@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "839286460671",
+    "firebase_url": "https://finalyearproject-b2776-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "finalyearproject-b2776",
+    "storage_bucket": "finalyearproject-b2776.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:839286460671:android:aa9a6037a55f346b647cca",
+        "android_client_info": {
+          "package_name": "com.example.fyp_project"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAFd5vjewqBsb9DDNr-c29L3MwSpfDJp4Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
