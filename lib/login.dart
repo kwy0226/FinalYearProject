@@ -78,7 +78,7 @@ class _LoginPageState extends State<LoginPage> {
     }
 
     try {
-      // 直接尝试登录（用异常判断 email 是否存在/密码是否正确）
+      // Attempt to log in directly (using exception handling to check if the email exists and the password is correct)
       final userCred = await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: email,
         password: password,
@@ -93,10 +93,10 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // 登录成功：清掉失败记录
+      // Login successful: Failed attempts cleared
       await _clearLockInfo(email);
 
-      // ✅ 检查是否被禁用
+      // Check if disabled
       final disabledSnap = await FirebaseDatabase.instance
           .ref('users/$uid/status/disabled')
           .get();
@@ -110,7 +110,7 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // 读取角色（吞掉数据库的 permission-denied，不再抛到外层）
+      // Read role (swallows permission-denied exceptions from the database, no longer propagating them outward)
       final db = FirebaseDatabase.instance.ref();
       bool isAdmin = false;
       bool isUser = false;
@@ -137,7 +137,6 @@ class _LoginPageState extends State<LoginPage> {
       } else if (isUser) {
         Navigator.pushReplacementNamed(context, "/home");
       } else {
-        // 没有角色节点
         setState(() {
           _error = "No role assigned for this account.";
         });
@@ -148,13 +147,13 @@ class _LoginPageState extends State<LoginPage> {
       );
 
     } on FirebaseAuthException catch (e) {
-      // 邮箱不存在
+      // Email address does not exist
       if (e.code == 'user-not-found') {
         setState(() {
           _error = "Invalid Email. Please try again.";
         });
       }
-      // 密码错误（或凭证失效统一当作密码错）
+      // Incorrect password (or invalid credentials treated uniformly as incorrect password)
       else if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
         final info = await _getLockInfo(email);
         int fails = (info['fails'] ?? 0) + 1;
@@ -173,7 +172,7 @@ class _LoginPageState extends State<LoginPage> {
           });
         }
       }
-      // 其他常见错误
+      // Other Common Errors
       else if (e.code == 'too-many-requests') {
         setState(() {
           _error = "You’ve tried too many times. Please try again later.";
@@ -192,7 +191,7 @@ class _LoginPageState extends State<LoginPage> {
         });
       }
     } catch (_) {
-      // 兜底（不再把数据库的异常落到这里）
+      // Fallback (no longer catch database exceptions here)
       setState(() {
         _error = "Login failed. Please try again.";
       });

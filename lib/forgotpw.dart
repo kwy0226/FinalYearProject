@@ -41,7 +41,7 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Password reset link sent to $email")),
       );
-      Navigator.pop(context); // 返回登录页
+      Navigator.pop(context); // Back to Login Page
     } on FirebaseAuthException catch (e) {
       setState(() => _error = e.message ?? "Password reset failed.");
     } finally {

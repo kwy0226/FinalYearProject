@@ -1,4 +1,3 @@
-// lib/chatbox.dart
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -12,6 +11,7 @@ import 'package:record/record.dart' as rec;
 import 'package:audioplayers/audioplayers.dart';
 
 import 'background_widget.dart';
+import 'chatsettings.dart';
 
 class ChatBoxPage extends StatefulWidget {
   const ChatBoxPage({super.key, required this.chatId});
@@ -22,18 +22,19 @@ class ChatBoxPage extends StatefulWidget {
 }
 
 class _ChatBoxPageState extends State<ChatBoxPage> {
+  // ===================== BASIC CONFIG =====================
   static const String kApiBase =
       "https://fyp-project-758812934986.asia-southeast1.run.app";
 
-  final _dio = Dio(BaseOptions(
+  final Dio _dio = Dio(BaseOptions(
     baseUrl: kApiBase,
     connectTimeout: const Duration(seconds: 15),
     receiveTimeout: const Duration(seconds: 20),
     headers: {"Content-Type": "application/json"},
   ));
 
-  final _textCtrl = TextEditingController();
-  final _scrollCtrl = ScrollController();
+  final TextEditingController _textCtrl = TextEditingController();
+  final ScrollController _scrollCtrl = ScrollController();
 
   late final String _uid;
   late final DatabaseReference _characterRef;
@@ -44,14 +45,14 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
   String _aiName = "Companion";
   String _aiGender = "unspecified";
   String _aiBackground = "";
+  String _aiAvatar = "assets/images/default_avatar.png";
+  String? _userPhotoB64;
 
   final rec.AudioRecorder _recorder = rec.AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
   bool _recording = false;
   Timer? _timer;
   int _recordDuration = 0;
-  String? _recordFilePath;
-
   Stream<DatabaseEvent>? _msgStream;
 
   @override
@@ -69,6 +70,8 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     _metaRef = _chatRef.child("meta");
 
     _ensureCharacter();
+    _loadAvatar();
+    _loadUserPhoto();
     _subscribeMessages();
   }
 
@@ -82,7 +85,9 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     super.dispose();
   }
 
-  /// 确保角色信息
+  // ===================== FIREBASE INITIALIZATION =====================
+
+  /// Create default AI character info if not exists
   Future<void> _ensureCharacter() async {
     final snap = await _characterRef.get();
     if (!mounted) return;
@@ -95,6 +100,7 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
           _aiGender = settings["gender"]!;
           _aiBackground = settings["background"]!;
         });
+
         await _characterRef.set({
           "aiName": _aiName,
           "aiGender": _aiGender,
@@ -117,71 +123,58 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     }
   }
 
-  Future<Map<String, String>?> _askForAiSettings(BuildContext ctx) async {
-    final nameCtrl = TextEditingController(text: _aiName);
-    final bgCtrl = TextEditingController(text: _aiBackground);
-    String gender = _aiGender;
+  /// Load AI avatar from Firebase meta
+  Future<void> _loadAvatar() async {
+    // First check meta
+    final metaSnap = await _metaRef.get();
+    if (metaSnap.child("selectedAvatar").exists) {
+      setState(() {
+        _aiAvatar = metaSnap.child("selectedAvatar").value.toString();
+      });
+      return;
+    }
 
-    return showDialog<Map<String, String>>(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (c) => AlertDialog(
-        title: const Text("Set your AI character"),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
-            controller: nameCtrl,
-            decoration: const InputDecoration(labelText: "AI Name"),
-          ),
-          DropdownButtonFormField<String>(
-            value: gender,
-            items: const [
-              DropdownMenuItem(value: "unspecified", child: Text("Unspecified")),
-              DropdownMenuItem(value: "male", child: Text("Male")),
-              DropdownMenuItem(value: "female", child: Text("Female")),
-            ],
-            onChanged: (v) => gender = v ?? "unspecified",
-          ),
-          TextField(
-            controller: bgCtrl,
-            maxLines: 3,
-            decoration: const InputDecoration(labelText: "AI Background"),
-          ),
-        ]),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c),
-              child: const Text("Cancel")),
-          FilledButton(
-              onPressed: () {
-                Navigator.pop(c, {
-                  "name": nameCtrl.text.trim(),
-                  "gender": gender,
-                  "background": bgCtrl.text.trim(),
-                });
-              },
-              child: const Text("Confirm")),
-        ],
-      ),
-    );
+    // If meta doesn't have it, check character node
+    final charSnap = await _characterRef.get();
+    if (charSnap.child("selectedAvatar").exists) {
+      setState(() {
+        _aiAvatar = charSnap.child("selectedAvatar").value.toString();
+      });
+
+      // Also write to meta for sync next time
+      await _metaRef.update({"selectedAvatar": _aiAvatar});
+    }
   }
 
+  /// Load user's own avatar (photoBase64)
+  Future<void> _loadUserPhoto() async {
+    final snap = await FirebaseDatabase.instance.ref("users/$_uid").get();
+    if (snap.child("photoBase64").exists) {
+      setState(() {
+        _userPhotoB64 = snap.child("photoBase64").value.toString();
+      });
+    }
+  }
+
+  /// Subscribe Firebase messages
   void _subscribeMessages() {
     _msgStream = _messagesRef.orderByChild("createdAt").onValue;
   }
 
+  // ===================== SEND TEXT =====================
   Future<void> _sendText() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
     _textCtrl.clear();
 
-    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch;
-    final msgRef = _messagesRef.push();
+    final msgRef = _messagesRef.push(); // Add one more message
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+
     await msgRef.set({
       "role": "user",
-      'createdAt': timestamp,  // ✅ 加这一行
       "type": "text",
-      "content": text,
-      "createdAt": ServerValue.timestamp,
+      "content": text, // Store message content in the database
+      "createdAt": timestamp, // Timestamps facilitate sorting
     });
 
     await _metaRef.update({
@@ -189,6 +182,7 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
       "updatedAt": ServerValue.timestamp,
     });
 
+    // Send to backend to generate AI reply
     try {
       await _dio.post("/chat/reply", data: {
         "message": text,
@@ -202,26 +196,28 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     } catch (_) {
       await msgRef.update({
         "aiReply": {
-          "content": "(.......)",
           "role": "assistant",
           "type": "text",
+          "content": "(...)",
           "createdAt": ServerValue.timestamp,
         }
       });
     }
   }
 
-  // ---------------- UI ----------------
+  // ===================== UI =====================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: StreamBuilder<DatabaseEvent>(
+        title: StreamBuilder(
           stream: _characterRef.onValue,
           builder: (context, snapshot) {
             String name = _aiName;
             if (snapshot.hasData && snapshot.data!.snapshot.exists) {
-              name = (snapshot.data!.snapshot.child("aiName").value ?? "Companion").toString();
+              name =
+                  (snapshot.data!.snapshot.child("aiName").value ?? "Companion")
+                      .toString();
             }
             return Text(name,
                 style: const TextStyle(
@@ -234,9 +230,23 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
           icon: const Icon(Icons.arrow_back, color: Colors.black),
           onPressed: () => Navigator.pop(context),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.more_vert, color: Colors.black),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => ChatSettingsPage(chatId: widget.chatId)),
+              ).then((_) => _loadAvatar());
+            },
+          ),
+        ],
       ),
+
       body: Stack(children: [
         const AppBackground(),
+
         Column(children: [
           Expanded(child: _buildMessages()),
           _recording ? _buildRecordingBar() : _buildInputBar(),
@@ -245,122 +255,160 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     );
   }
 
+  // ===================== CHAT LIST + AVATARS =====================
   Widget _buildMessages() {
-    return StreamBuilder<DatabaseEvent>(
-      stream: _msgStream,
+    return StreamBuilder(
+      stream: _msgStream, // Listen from Firebase Realtime Database
       builder: (c, snap) {
         final messages = <Map<String, dynamic>>[];
+
         if (snap.hasData) {
           final data = snap.data!.snapshot;
+
           for (final m in data.children) {
+            // Read messages sent by the user
             messages.add({
-              "key": m.key,
               "role": m.child("role").value,
-              "content": m.child("content").value,
               "type": m.child("type").value,
-              "createdAt": m.child("createdAt").value,
+              "content": m.child("content").value,
               "localPath": m.child("localPath").value,
+              "createdAt": m.child("createdAt").value,
             });
+
+            // ai reply
             if (m.child("aiReply").exists) {
               messages.add({
-                "key": "${m.key}_ai",
                 "role": m.child("aiReply/role").value,
-                "content": m.child("aiReply/content").value,
                 "type": m.child("aiReply/type").value,
+                "content": m.child("aiReply/content").value,
                 "createdAt": m.child("aiReply/createdAt").value,
               });
             }
           }
         }
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scrollCtrl.hasClients) {
+            _scrollCtrl.animateTo(
+              _scrollCtrl.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOut,
+            );
+          }
+        });
+
         return ListView.builder(
           controller: _scrollCtrl,
           itemCount: messages.length,
+          padding: const EdgeInsets.symmetric(vertical: 8),
           itemBuilder: (c, i) {
-            final m = messages[i];
-            final isMe = m["role"] == "user";
-            final type = m["type"];
-            Widget child;
+            final msg = messages[i];
+            final isMe = msg["role"] == "user";
+            final type = msg["type"];
+            Widget contentWidget;
+
+            // Voice message
             if (type == "audio") {
-              final localPath = m["localPath"]?.toString();
-              child = Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.play_arrow, color: Colors.white),
+              final path = msg["localPath"]?.toString();
+              contentWidget = Row(children: [
+                IconButton(
+                    icon: const Icon(Icons.play_arrow, color: Colors.black),
                     onPressed: () async {
-                      if (localPath != null &&
-                          File(localPath).existsSync()) {
-                        await _player.play(DeviceFileSource(localPath));
-                      } else {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("音频文件不存在")),
-                        );
+                      if (path != null && File(path).existsSync()) {
+                        await _player.play(DeviceFileSource(path));
                       }
-                    },
-                  ),
-                  Text((m["content"] ?? "").toString(),
-                      style: const TextStyle(color: Colors.white)),
-                ],
-              );
+                    }),
+                Text((msg["content"] ?? "").toString(),
+                    style: const TextStyle(color: Colors.black)),
+              ]);
             } else {
-              child = Text(
-                (m["content"] ?? "").toString(),
-                style: const TextStyle(color: Colors.white),
+              contentWidget = Text(
+                (msg["content"] ?? '').toString(),
+                style: TextStyle(
+                    color: isMe ? Colors.white : Colors.black, fontSize: 15),
               );
             }
-            return GestureDetector(
-              onLongPress: () => _messagesRef.child(m["key"]).remove(),
-              child: _bubble(isMe: isMe, child: child),
-            );
+
+            return _chatRow(isMe: isMe, child: contentWidget);
           },
         );
       },
     );
   }
 
-  Widget _bubble({required bool isMe, required Widget child}) {
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          color: isMe ? Colors.green : Colors.blueGrey,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: child,
+  /// Single message row with avatar
+  Widget _chatRow({required bool isMe, required Widget child}) {
+    final avatar = isMe
+        ? (_userPhotoB64 == null
+        ? const CircleAvatar(radius: 16, child: Icon(Icons.person))
+        : CircleAvatar(
+        radius: 16,
+        backgroundImage: MemoryImage(
+          base64Decode(_userPhotoB64!.split(',').last),
+        )))
+        : CircleAvatar(radius: 16, backgroundImage: AssetImage(_aiAvatar));
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisAlignment:
+        isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: [
+          if (!isMe) avatar,
+          if (!isMe) const SizedBox(width: 8),
+          Flexible(child: _bubble(isMe: isMe, child: child)),
+          if (isMe) const SizedBox(width: 8),
+          if (isMe) avatar,
+        ],
       ),
     );
   }
 
+  /// Chat bubble UI
+  Widget _bubble({required bool isMe, required Widget child}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: isMe ? Colors.green[400] : Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(0.06),
+              blurRadius: 3,
+              offset: const Offset(0, 1))
+        ],
+      ),
+      child: child,
+    );
+  }
+
+  // ===================== INPUT BAR =====================
   Widget _buildInputBar() {
     return SafeArea(
       child: Row(children: [
         IconButton(
-          icon: const Icon(Icons.mic, color: Colors.brown),
-          onPressed: _startRecording,
-        ),
+            icon: const Icon(Icons.mic, color: Colors.brown),
+            onPressed: _startRecording),
         Expanded(
-          child: TextField(
-            controller: _textCtrl,
-            decoration: const InputDecoration(
-                hintText: "Type a message...",
-                border: OutlineInputBorder()),
-            onSubmitted: (_) => _sendText(),
-          ),
-        ),
+            child: TextField(
+              controller: _textCtrl,
+              decoration: const InputDecoration(
+                  hintText: "Type a message...", border: OutlineInputBorder()),
+              onSubmitted: (_) => _sendText(),
+            )),
         IconButton(
-          icon: const Icon(Icons.send, color: Colors.brown),
-          onPressed: _sendText,
-        ),
+            icon: const Icon(Icons.send, color: Colors.brown),
+            onPressed: _sendText),
       ]),
     );
   }
 
+  // ===================== RECORDING BAR =====================
   Widget _buildRecordingBar() {
     return Container(
       color: Colors.red[50],
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(10),
       child: Row(children: [
         Text("Recording: $_recordDuration s"),
         const Spacer(),
@@ -374,42 +422,32 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     );
   }
 
-  // ----------------- AUDIO -----------------
+  // ===================== AUDIO FUNCTIONS =====================
   Future<void> _startRecording() async {
     final hasPerm = await _recorder.hasPermission();
     if (!hasPerm) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Microphone permission is required')),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Microphone permission required")),
+      );
       return;
     }
 
-    // 自定义目录: Download/ChatVoices/{uid}
     Directory? baseDir = await getDownloadsDirectory();
-    baseDir ??= await getApplicationDocumentsDirectory(); // fallback iOS
-    final userDir = Directory("${baseDir.path}/ChatVoices/$_uid");
-    if (!(await userDir.exists())) {
-      await userDir.create(recursive: true);
-    }
+    baseDir ??= await getApplicationDocumentsDirectory();
+    final dir = Directory("${baseDir.path}/ChatVoices/$_uid");
+    if (!(await dir.exists())) await dir.create(recursive: true);
 
-    final path =
-        "${userDir.path}/chat_${DateTime.now().millisecondsSinceEpoch}.wav";
+    final path = "${dir.path}/audio_${DateTime.now().millisecondsSinceEpoch}.wav";
 
     await _recorder.start(
       rec.RecordConfig(
-        encoder: rec.AudioEncoder.wav,
-        sampleRate: 16000,
-        numChannels: 1,
-      ),
+          encoder: rec.AudioEncoder.wav, sampleRate: 16000, numChannels: 1),
       path: path,
     );
 
     setState(() {
       _recording = true;
       _recordDuration = 0;
-      _recordFilePath = path;
     });
 
     _timer?.cancel();
@@ -429,22 +467,19 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
       return;
     }
 
-    setState(() {
-      _recording = false;
-      _recordFilePath = path;
-    });
+    setState(() => _recording = false);
     await _sendVoice(path, _recordDuration);
   }
 
   Future<void> _sendVoice(String filePath, int duration) async {
     final msgRef = _messagesRef.push();
-    final timestamp = DateTime.now().toUtc().millisecondsSinceEpoch;
+
     await msgRef.set({
       "role": "user",
       "type": "audio",
-      "createdAt": timestamp,  // ✅ 加这一行
       "content": "(voice $duration s)",
-      "localPath": filePath, // ✅ 存储本地路径
+      "localPath": filePath,
+      "createdAt": DateTime.now().millisecondsSinceEpoch,
     });
 
     await _metaRef.update({
@@ -454,7 +489,7 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
 
     try {
       final bytes = await File(filePath).readAsBytes();
-      final b64 = base64.encode(bytes);
+      final String b64 = base64.encode(bytes);
 
       await _dio.post("/audio/process", data: {
         "wav_base64": "data:audio/wav;base64,$b64",
@@ -462,15 +497,65 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
         "chatId": widget.chatId,
         "msgId": msgRef.key,
       });
-    } catch (e) {
+    } catch (_) {
       await msgRef.update({
         "aiReply": {
-          "content": "(.......)",
           "role": "assistant",
           "type": "text",
+          "content": "(...)",
           "createdAt": ServerValue.timestamp,
         }
       });
     }
+  }
+
+  // ===================== AI SETTINGS POPUP =====================
+  Future<Map<String, String>?> _askForAiSettings(BuildContext context) async {
+    final TextEditingController nameCtrl =
+    TextEditingController(text: _aiName);
+    final TextEditingController bgCtrl =
+    TextEditingController(text: _aiBackground);
+    String gender = _aiGender;
+
+    return showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        title: const Text("Set your AI character"),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: nameCtrl,
+              decoration: const InputDecoration(labelText: "AI Name")),
+          DropdownButtonFormField<String>(
+            value: gender,
+            items: const [
+              DropdownMenuItem(
+                  value: "unspecified", child: Text("Unspecified")),
+              DropdownMenuItem(value: "male", child: Text("Male")),
+              DropdownMenuItem(value: "female", child: Text("Female")),
+            ],
+            onChanged: (v) => gender = v ?? "unspecified",
+          ),
+          TextField(
+              controller: bgCtrl,
+              maxLines: 3,
+              decoration: const InputDecoration(labelText: "AI Background")),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c),
+              child: const Text("Cancel")),
+          FilledButton(
+              onPressed: () {
+                Navigator.pop(c, {
+                  "name": nameCtrl.text.trim(),
+                  "gender": gender,
+                  "background": bgCtrl.text.trim(),
+                });
+              },
+              child: const Text("Confirm")),
+        ],
+      ),
+    );
   }
 }

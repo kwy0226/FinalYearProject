@@ -123,22 +123,10 @@ class _SettingsPageState extends State<SettingsPage> {
                         onTap: () => Navigator.pushNamed(context, '/editProfile'),
                       ),
                       ListTile(
-                        leading: const Icon(Icons.feedback, color: Color(0xFF8B6B4A)),
-                        title: const Text("Feedback / Suggestions"),
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () => Navigator.pushNamed(context, '/feedback'),
-                      ),
-                      ListTile(
                         leading: const Icon(Icons.info, color: Color(0xFF8B6B4A)),
                         title: const Text("About Us"),
                         trailing: const Icon(Icons.arrow_forward_ios, size: 16),
                         onTap: () => Navigator.pushNamed(context, '/aboutus'),
-                      ),
-                      ListTile(
-                        leading: const Icon(Icons.help, color: Color(0xFF8B6B4A)),
-                        title: const Text("Help Center"),
-                        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                        onTap: () => Navigator.pushNamed(context, '/help'),
                       ),
                       const Divider(),
 

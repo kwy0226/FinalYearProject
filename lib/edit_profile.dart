@@ -32,10 +32,10 @@ class _EditProfilePageState extends State<EditProfilePage> {
   @override
   void initState() {
     super.initState();
-    _loadProfile(); // 进入页面拉取 username/gender/photoBase64
+    _loadProfile(); // Enter the page to fetch username/gender/photoBase64
   }
 
-  // ---- 读取 /users/<uid>，并安全解包 Map ----
+  // Read /users/<uid> and safely unpack the Map
   Future<void> _loadProfile() async {
     final user = _auth.currentUser;
     if (user == null) return;
@@ -52,14 +52,14 @@ class _EditProfilePageState extends State<EditProfilePage> {
         _photoBase64 = map['photoBase64'] as String?;
       });
     } catch (e) {
-      // 如果这里因权限读不到，也会导致用户名没显示
+      // If permissions prevent reading here, it will also cause the username to not display.
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to load profile: $e')),
       );
     }
   }
 
-  // ---- 选择图片 -> 转 Base64 -> 存到 /users/<uid>/photoBase64 ----
+  // Select image -> Convert to Base64 -> Save to /users/<uid>/photoBase64
   Future<void> _pickAndSavePhoto() async {
     final user = _auth.currentUser;
     if (user == null) return;
@@ -71,7 +71,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
 
       setState(() => _loading = true);
 
-      // 读取为字节并转 Base64（头像建议 < 400KB，避免 DB 节点过大）
+      // Read as bytes and convert to Base64 (Avatar size should be < 400KB to prevent excessive DB node size)
       final bytes = await File(picked.path).readAsBytes();
       final base64Str = base64Encode(bytes);
 
@@ -85,7 +85,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
         const SnackBar(content: Text('Profile photo updated.')),
       );
     } catch (e) {
-      // 典型错误：permission-denied（需要上面的 DB 规则）
+      // permission denied (requires the DB rules above)
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to save photo: $e')),
       );
@@ -94,7 +94,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
     }
   }
 
-  // ---- 保存 username + gender 到同级节点 ----
+  // Save username + gender to the same-level node
   Future<void> _saveProfile() async {
     final user = _auth.currentUser;
     if (user == null) return;
@@ -105,14 +105,14 @@ class _EditProfilePageState extends State<EditProfilePage> {
       await _db.ref('users/${user.uid}').update({
         'username': _usernameCtrl.text.trim(),
         'gender': _gender ?? 'Male',
-        // photoBase64 已在单独上传时写入，无需重复传
+        // photoBase64 has already been written during separate uploads and does not need to be uploaded again.
       });
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Profile updated successfully.')),
       );
-      Navigator.pop(context); // 返回 Settings
+      Navigator.pop(context); // Back to Settings
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to update profile: $e')),

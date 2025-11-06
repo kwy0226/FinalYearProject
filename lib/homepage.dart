@@ -64,7 +64,7 @@ class _HomePageState extends State<HomePage> {
               final meta = chat['meta'] as Map?;
               chats.add({
                 'chatId': chatId,
-                'aiName': meta?['aiName'] ?? 'Companion', // ✅ 优先显示 AI 名称
+                'aiName': meta?['aiName'] ?? 'Companion',
                 'lastMessage': meta?['lastMessage'] ?? '',
                 'updatedAt': meta?['updatedAt'] ?? 0,
               });
@@ -161,7 +161,7 @@ class _HomePageState extends State<HomePage> {
       'createdAt': now,
       'updatedAt': now,
       'lastMessage': '',
-      'aiName': 'Companion', // ✅ 创建时也加默认名称
+      'aiName': 'Companion',
     });
 
     if (!mounted) return;

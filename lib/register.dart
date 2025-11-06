@@ -199,11 +199,11 @@ class _RegisterPageState extends State<RegisterPage> {
       final ref = FirebaseDatabase.instance.ref("users/$uid");
       await ref.set({
         "username": _usernameCtrl.text.trim(),
-        "email": _emailCtrl.text.trim(), // 建议也一起存，方便 admin 页面统一显示
+        "email": _emailCtrl.text.trim(),
         "birthday": {"year": _year, "month": _month, "day": _day},
         "createdAt": DateTime.now().toUtc().toIso8601String(),
         "status": {
-          "disabled": false, // ✅ 新增这一行
+          "disabled": false,
         },
       });
 

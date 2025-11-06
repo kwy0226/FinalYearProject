@@ -1,516 +1,257 @@
-import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:http/http.dart' as http;
 import 'background_widget.dart';
-import 'chatbox.dart';
 
-class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+/// ✅ 填自己的 Key
+const String openAIApiKey = "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";
+
+class ChartPage extends StatefulWidget {
+  const ChartPage({Key? key}) : super(key: key);
 
   @override
-  State<HomePage> createState() => _HomePageState();
+  State<ChartPage> createState() => _ChartPageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _ChartPageState extends State<ChartPage> {
   final _auth = FirebaseAuth.instance;
-  StreamSubscription<DatabaseEvent>? _profileSub;
-  StreamSubscription<DatabaseEvent>? _chatHistorySub;
+  final _db = FirebaseDatabase.instance.ref();
 
-  String? _username;
-  String? _photoBase64;
-  int _tabIndex = 0;
-  List<Map<String, dynamic>> recentChats = [];
+  /// ✅ 按天统计（PieChart 用）
+  final Map<String, Map<String, int>> dailyEmotionCounts = {};
+  final Map<String, int> totalEmotionCounts = {
+    "happy": 0,
+    "sad": 0,
+    "angry": 0,
+    "neutral": 0,
+  };
 
-  // ==============================
-  // Mood Check-In 状态
-  // ==============================
-  String? _selectedMood;
-  bool _submittedMood = false;
-  bool _moodCheckLoading = true; // ✅ 用来防止页面切回来时出现“短暂可点击”现象
+  /// ✅ Version B – 用来画折线图的时间序列
+  final List<Map<String, dynamic>> messageTimeline = [];
+
+  int _tabIndex = 2;
+  int selectedMonth = DateTime.now().month;
+  int selectedYear = DateTime.now().year;
+
+  String gptSuggestion = "";
+  bool isLoadingSuggestion = true;
+
+  late Future<void> _loadFuture;
+
+  final List<String> monthNames = const [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+  ];
 
   @override
   void initState() {
     super.initState();
-    _loadProfile();
-    _loadChatHistory();
-    _checkMoodSubmittedToday(); // 检查当天是否已提交 mood
+    _loadFuture = fetchEmotionData();
   }
 
-  /// 监听用户资料
-  void _loadProfile() {
+  /// ✅ 读取 Firebase 情绪资料 + 时间线
+  Future<void> fetchEmotionData() async {
     final user = _auth.currentUser;
     if (user == null) return;
 
-    final uid = user.uid;
-    _profileSub = FirebaseDatabase.instance.ref('users/$uid').onValue.listen(
-          (event) {
-        final data = (event.snapshot.value as Map?) ?? {};
-        setState(() {
-          _username = data['username'] as String? ?? 'User';
-          _photoBase64 = data['photoBase64'] as String?;
-        });
-      },
-    );
-  }
+    dailyEmotionCounts.clear();
+    messageTimeline.clear();
+    totalEmotionCounts.updateAll((key, value) => 0);
 
-  /// 载入聊天记录
-  void _loadChatHistory() {
-    final user = _auth.currentUser;
-    if (user == null) return;
+    try {
+      final uid = user.uid;
+      final snapshot = await _db.child("chathistory/$uid").get();
 
-    final uid = user.uid;
-    _chatHistorySub =
-        FirebaseDatabase.instance.ref('chathistory/$uid').onValue.listen(
-              (event) {
-            final data = (event.snapshot.value as Map?) ?? {};
-            List<Map<String, dynamic>> chats = [];
+      if (snapshot.exists) {
+        final data = snapshot.value as Map<dynamic, dynamic>;
 
-            data.forEach((chatId, value) {
-              final chat = value as Map;
-              final meta = chat['meta'] as Map?;
-              chats.add({
-                'chatId': chatId,
-                'lastMessage': meta?['lastMessage'] ?? '',
-                'updatedAt': meta?['updatedAt'] ?? 0,
-              });
-            });
+        for (final chatEntry in data.entries) {
+          final messages = chatEntry.value['messages'];
 
-            chats.sort((a, b) => b['updatedAt'].compareTo(a['updatedAt']));
-            setState(() {
-              recentChats = chats;
-            });
-          },
-        );
-  }
+          if (messages is Map) {
+            for (final msgEntry in messages.entries) {
+              final msg = msgEntry.value;
 
-  /// 检查当天是否已经提交过 Mood Check-In
-  Future<void> _checkMoodSubmittedToday() async {
-    final user = _auth.currentUser;
-    if (user == null) return;
+              if (msg is Map && msg['emotion'] != null) {
+                final createdAt = msg['createdAt'];
+                if (createdAt == null) continue;
 
-    final uid = user.uid;
-    final today = DateTime.now();
-    final dateKey =
-        "${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}";
+                final createdDate =
+                DateTime.fromMillisecondsSinceEpoch(createdAt);
 
-    final snap = await FirebaseDatabase.instance.ref('moodcheckin/$uid/$dateKey').get();
+                if (createdDate.isAfter(DateTime.now())) continue;
+                if (createdDate.month != selectedMonth ||
+                    createdDate.year != selectedYear) continue;
 
-    if (snap.exists) {
-      final data = snap.value as Map;
-      setState(() {
-        _selectedMood = data['mood'] as String?;
-        _submittedMood = true;
-        _moodCheckLoading = false; // ✅ 检查完毕
-      });
-    } else {
-      setState(() {
-        _selectedMood = null;
-        _submittedMood = false;
-        _moodCheckLoading = false; // ✅ 检查完毕
-      });
-    }
-  }
+                final rawLabel =
+                (msg['emotion']['label'] ?? "").toString().toLowerCase();
 
-  /// 提交 Mood Check-In（每天仅一次）
-  Future<void> _submitMood() async {
-    if (_selectedMood == null || _submittedMood) return;
+                String? label;
+                if (rawLabel == "joy") label = "happy";
+                else if (["sad", "angry", "neutral"].contains(rawLabel)) label = rawLabel;
+                if (label == null) continue;
 
-    final user = _auth.currentUser;
-    if (user == null) return;
+                /// ✅ PieChart 用
+                final dateStr = createdDate.toString().substring(0, 10);
+                dailyEmotionCounts.putIfAbsent(dateStr, () => {
+                  "happy": 0,
+                  "sad": 0,
+                  "angry": 0,
+                  "neutral": 0,
+                });
+                dailyEmotionCounts[dateStr]![label] =
+                    dailyEmotionCounts[dateStr]![label]! + 1;
 
-    final uid = user.uid;
-    final now = DateTime.now().toUtc();
-    final dateKey =
-        "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+                totalEmotionCounts[label] = totalEmotionCounts[label]! + 1;
 
-    final ref = FirebaseDatabase.instance.ref('moodcheckin/$uid/$dateKey');
-
-    // 再次检查，防止重复提交或篡改
-    final existing = await ref.get();
-    if (existing.exists) {
-      setState(() {
-        _submittedMood = true;
-        _selectedMood = (existing.value as Map)['mood'];
-      });
-      return;
-    }
-
-    await ref.set({
-      'mood': _selectedMood,
-      'timestamp': now.toIso8601String(),
-    });
-
-    setState(() {
-      _submittedMood = true;
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Mood $_selectedMood submitted successfully.")),
-    );
-  }
-
-  /// 呼吸练习弹窗（带文字 + 倒计时）
-  void _openBreathingModal() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        int seconds = 60;
-        Timer? timer;
-
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            void startTimer() {
-              timer = Timer.periodic(const Duration(seconds: 1), (t) {
-                if (seconds == 0) {
-                  t.cancel();
-                  setModalState(() {});
-                } else {
-                  setModalState(() => seconds--);
-                }
-              });
+                /// ✅ Line Chart 用：每条讯息一个点
+                messageTimeline.add({
+                  "time": createdDate,
+                  "text": msg["content"] ?? "",
+                  "emotion": label,
+                });
+              }
             }
+          }
+        }
+      }
 
-            return AlertDialog(
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)),
-              title: const Text("1-Minute Breathing"),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text(
-                    "Breathe in through your nose for 4 seconds,\n"
-                        "hold for 4 seconds,\n"
-                        "and slowly exhale through your mouth for 6 seconds.\n\n"
-                        "Relax your shoulders and focus only on your breath.",
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 16),
-                  if (seconds < 60)
-                    Text(
-                      seconds > 0
-                          ? "⏳ Time remaining: $seconds s"
-                          : "🎉 Great job! You've completed the session.",
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                ],
-              ),
-              actions: [
-                if (seconds == 60)
-                  TextButton(
-                    onPressed: startTimer,
-                    child: const Text("Start"),
-                  ),
-                TextButton(
-                  onPressed: () {
-                    timer?.cancel();
-                    Navigator.pop(ctx);
-                  },
-                  child: const Text("Close"),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
+      /// ✅ 时间排序（折线图需要）
+      messageTimeline.sort((a, b) =>
+          a["time"].compareTo(b["time"]));
+    } catch (_) {}
+
+    await _generateGptSuggestion();
   }
 
-  /// 新建聊天
-  Future<void> _createNewChatAndOpen() async {
-    final user = _auth.currentUser;
-    if (user == null) return;
-
-    final uid = user.uid;
-    final now = DateTime.now().toUtc().millisecondsSinceEpoch;
-    final ref = FirebaseDatabase.instance.ref('chathistory/$uid').push();
-    final chatId = ref.key;
-    if (chatId == null) return;
-
-    await ref.child('meta').set({
-      'createdAt': now,
-      'updatedAt': now,
-      'lastMessage': '',
-    });
-
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => ChatBoxPage(chatId: chatId)),
-    );
-  }
-
-  void _onBottomTap(int index) {
-    if (index == _tabIndex) return;
-    setState(() => _tabIndex = index);
-
-    switch (index) {
-      case 0:
-        break;
-      case 1:
-        Navigator.pushNamed(context, '/chats');
-        break;
-      case 2:
-        Navigator.pushNamed(context, '/chart');
-        break;
-      case 3:
-        Navigator.pushNamed(context, '/settings');
-        break;
+  /// ✅ PieChart Ratio
+  Map<String, double> calculateRatios() {
+    final total = totalEmotionCounts.values.fold(0, (a, b) => a + b);
+    if (total == 0) {
+      return {"happy": 0, "sad": 0, "angry": 0, "neutral": 0};
     }
+    return {
+      "happy": totalEmotionCounts["happy"]! / total,
+      "sad": totalEmotionCounts["sad"]! / total,
+      "angry": totalEmotionCounts["angry"]! / total,
+      "neutral": totalEmotionCounts["neutral"]! / total,
+    };
   }
 
-  Widget _buildAvatar() {
-    if (_photoBase64 != null && _photoBase64!.isNotEmpty) {
-      return CircleAvatar(
-        radius: 26,
-        backgroundImage: MemoryImage(base64Decode(_photoBase64!)),
-      );
-    } else {
-      final initials =
-      _username?.isNotEmpty == true ? _username![0].toUpperCase() : 'U';
-      return CircleAvatar(
-        radius: 26,
-        backgroundColor: const Color(0xFFDECDBE),
-        child: Text(
-          initials,
-          style: const TextStyle(
-              color: Color(0xFF5E4631), fontWeight: FontWeight.bold),
-        ),
+  /// ✅ emotion 转成高度 (折线图 Y Axis)
+  double emotionScore(String e) {
+    switch (e) {
+      case "happy":
+        return 3;
+      case "neutral":
+        return 2;
+      case "sad":
+        return 1;
+      case "angry":
+        return 0;
+    }
+    return 0;
+  }
+
+  /// ✅ Line Chart 点
+  List<FlSpot> _buildLineSpots() {
+    List<FlSpot> spots = [];
+    for (int i = 0; i < messageTimeline.length; i++) {
+      spots.add(
+        FlSpot(i.toDouble(), emotionScore(messageTimeline[i]["emotion"])),
       );
     }
+    return spots;
   }
 
-  @override
-  void dispose() {
-    _profileSub?.cancel();
-    _chatHistorySub?.cancel();
-    super.dispose();
-  }
+  /// ✅ LineChart with popup dialog
+  Widget _buildEmotionLineChart() {
+    if (messageTimeline.isEmpty) return const SizedBox();
 
-  @override
-  Widget build(BuildContext context) {
-    final name = _username ?? 'User';
-    final theme = Theme.of(context);
+    final spots = _buildLineSpots();
 
-    return Scaffold(
-      body: Stack(
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7E9),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
         children: [
-          const AppBackground(),
-          SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // ===== Header =====
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          _buildAvatar(),
-                          const SizedBox(width: 12),
-                          Text(
-                            "Welcome back, $name 👋",
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                              color: const Color(0xFF5E4631),
-                            ),
-                          ),
-                        ],
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.logout_rounded,
-                            color: Color(0xFF8B6B4A)),
-                        onPressed: () async {
-                          await _auth.signOut();
-                          if (!mounted) return;
-                          Navigator.of(context).pushNamedAndRemoveUntil(
-                              '/login', (route) => false);
-                        },
-                      )
-                    ],
-                  ),
+          const Text(
+            "Daily Emotion Fluctuation",
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+          ),
+          SizedBox(
+            height: 200,
+            child: LineChart(
+              LineChartData(
+                minY: 0,
+                maxY: 3,
+                gridData: FlGridData(show: true),
 
-                  const SizedBox(height: 20),
+                /// ✅ 点击点 → 弹窗显示完整内容
+                lineTouchData: LineTouchData(
+                  handleBuiltInTouches: true,
+                  touchCallback: (event, response) {
+                    if (event is FlTapUpEvent && response?.lineBarSpots != null) {
+                      final idx = response!.lineBarSpots![0].x.toInt();
+                      final node = messageTimeline[idx];
 
-                  // ===== Daily Emotional Mini-Practice =====
-                  Card(
-                    color: const Color(0xFFFFF7E9),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    elevation: 4,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "Daily Emotional Mini-Practice",
-                            style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF5E4631)),
+                      showDialog(
+                        context: context,
+                        builder: (_) => AlertDialog(
+                          title: Text("Emotion: ${node["emotion"]}"),
+                          content: Text(
+                            "Time: ${node["time"]}\n\nMessage:\n${node["text"]}",
+                            style: const TextStyle(fontSize: 14),
                           ),
-                          const SizedBox(height: 8),
-                          const Text(
-                            "💛 You deserve kindness — from yourself too.",
-                            style: TextStyle(color: Color(0xFF5E4631)),
-                          ),
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFFB08968),
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                              onPressed: _openBreathingModal,
-                              child: const Text("Start 1-min Breathing"),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // ===== Mood Check-In =====
-                  Card(
-                    color: const Color(0xFFFFF7E9),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16)),
-                    elevation: 4,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            "Mood Check-In",
-                            style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF5E4631)),
-                          ),
-                          const SizedBox(height: 12),
-
-                          // ✅ Mood Chip 加载状态
-                          if (_moodCheckLoading)
-                            const Center(
-                              child: Padding(
-                                padding: EdgeInsets.symmetric(vertical: 8),
-                                child: CircularProgressIndicator(),
-                              ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context),
+                              child: const Text("Close"),
                             )
-                          else
-                            Wrap(
-                              spacing: 8,
-                              children: ["Happy", "Sad", "Angry", "Neutral"]
-                                  .map(
-                                    (mood) => ChoiceChip(
-                                  label: Text(mood),
-                                  selected: _selectedMood == mood,
-                                  onSelected: _submittedMood
-                                      ? null
-                                      : (val) {
-                                    setState(() {
-                                      _selectedMood =
-                                      val ? mood : null;
-                                    });
-                                  },
-                                ),
-                              )
-                                  .toList(),
-                            ),
-
-                          const SizedBox(height: 12),
-
-                          // ✅ 按钮也根据加载状态控制
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              onPressed: _moodCheckLoading ||
-                                  _selectedMood == null ||
-                                  _submittedMood
-                                  ? null
-                                  : _submitMood,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFFB08968),
-                                foregroundColor: Colors.white,
-                              ),
-                              child: _moodCheckLoading
-                                  ? const Text("Loading...")
-                                  : Text(
-                                  _submittedMood ? "Submitted" : "Submit"),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 20),
-
-                  // ===== Recent Chats =====
-                  const Text(
-                    "Recent Chats",
-                    style: TextStyle(
-                        fontWeight: FontWeight.w700, color: Color(0xFF5E4631)),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    height: 200,
-                    child: recentChats.isEmpty
-                        ? const Text("No chat history yet.")
-                        : ListView.builder(
-                      itemCount: recentChats.length,
-                      itemBuilder: (context, index) {
-                        final chat = recentChats[index];
-                        return ListTile(
-                          leading:
-                          const Icon(Icons.chat_bubble_outline),
-                          title: Text(chat['lastMessage'].isEmpty
-                              ? "(No message yet)"
-                              : chat['lastMessage']),
-                          subtitle: Text(
-                            "Updated: ${DateTime.fromMillisecondsSinceEpoch(chat['updatedAt'])}",
-                          ),
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) =>
-                                    ChatBoxPage(chatId: chat['chatId']),
-                              ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  // ===== Let’s Chat Button =====
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _createNewChatAndOpen,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFB08968),
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                          ],
                         ),
-                      ),
-                      child: const Text("Let's Chat!"),
-                    ),
+                      );
+                    }
+                  },
+                ),
+
+                titlesData: FlTitlesData(
+                  leftTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                        showTitles: true,
+                        getTitlesWidget: (v, _) {
+                          switch (v.toInt()) {
+                            case 3:
+                              return const Text("Happy", style: TextStyle(fontSize: 10));
+                            case 2:
+                              return const Text("Neutral", style: TextStyle(fontSize: 10));
+                            case 1:
+                              return const Text("Sad", style: TextStyle(fontSize: 10));
+                            case 0:
+                              return const Text("Angry", style: TextStyle(fontSize: 10));
+                          }
+                          return const SizedBox();
+                        }),
+                  ),
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(showTitles: false),
+                  ),
+                ),
+
+                lineBarsData: [
+                  LineChartBarData(
+                    isCurved: true,
+                    color: const Color(0xFF8B6B4A),
+                    barWidth: 3,
+                    dotData: FlDotData(show: true),
+                    spots: spots,
                   ),
                 ],
               ),
@@ -518,45 +259,326 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
+    );
+  }
 
-      // ===== 底部导航栏 =====
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF7E9),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.06),
-              blurRadius: 12,
-              offset: const Offset(0, -2),
+  /// ✅ GPT Summary （新版 API）
+  Future<void> _generateGptSuggestion() async {
+    final total = totalEmotionCounts.values.fold(0, (a, b) => a + b);
+    if (total == 0) {
+      setState(() {
+        gptSuggestion = "No data for this month.";
+        isLoadingSuggestion = false;
+      });
+      return;
+    }
+
+    setState(() => isLoadingSuggestion = true);
+
+    final ratios = calculateRatios();
+    final summary =
+        "Total messages: $total\n"
+        "Happy: ${(ratios["happy"]! * 100).toStringAsFixed(1)}%\n"
+        "Sad: ${(ratios["sad"]! * 100).toStringAsFixed(1)}%\n"
+        "Angry: ${(ratios["angry"]! * 100).toStringAsFixed(1)}%\n"
+        "Neutral: ${(ratios["neutral"]! * 100).toStringAsFixed(1)}%\n"
+        "Timeline points: ${messageTimeline.length}";
+
+    final prompt =
+        "You are a friendly mental health companion.\n"
+        "User emotion summary:\n$summary\n"
+        "Give a short supportive advice in 2 sentences.";
+
+    try {
+      final resp = await http.post(
+        Uri.parse("https://api.openai.com/v1/responses"),
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer $openAIApiKey",
+        },
+        body: jsonEncode({
+          "model": "gpt-4o-mini",
+          "input": prompt,
+          "max_output_tokens": 120,
+        }),
+      );
+
+      print("✅ GPT Raw Response:\n${resp.body}\n");
+
+      if (resp.statusCode == 200) {
+        final resJson = jsonDecode(resp.body);
+
+        /// ✅ ✅ 正确解析新版 API
+        if (resJson["output"] != null &&
+            resJson["output"] is List &&
+            resJson["output"].isNotEmpty &&
+            resJson["output"][0]["content"] != null) {
+          gptSuggestion = resJson["output"][0]["content"];
+        } else {
+          gptSuggestion = "No suggestion generated.";
+        }
+      } else {
+        gptSuggestion = "Failed to get suggestion (${resp.statusCode}).";
+      }
+    } catch (e) {
+      gptSuggestion = "GPT suggestion unavailable.";
+      print("❌ GPT Error: $e");
+    }
+
+    if (mounted) setState(() => isLoadingSuggestion = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ratios = calculateRatios();
+    final total = totalEmotionCounts.values.fold(0, (a, b) => a + b);
+
+    return Scaffold(
+      body: Stack(
+        children: [
+          const AppBackground(),
+          SafeArea(
+            child: FutureBuilder(
+              future: _loadFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
+                return Column(
+                  children: [
+                    const SizedBox(height: 16),
+                    const Text(
+                      "Emotion Trend Chart",
+                      style:
+                      TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                    ),
+                    const Divider(
+                        color: Color(0xFFB08968), indent: 20, endIndent: 20),
+
+                    /// ✅ 月份选择
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        DropdownButton<int>(
+                          value: selectedMonth,
+                          items: List.generate(
+                              12,
+                                  (i) => DropdownMenuItem(
+                                  value: i + 1, child: Text(monthNames[i]))),
+                          onChanged: (v) {
+                            selectedMonth = v!;
+                            _loadFuture = fetchEmotionData();
+                            setState(() {});
+                          },
+                        ),
+                        const SizedBox(width: 12),
+                        DropdownButton<int>(
+                          value: selectedYear,
+                          items: List.generate(5, (i) {
+                            final y = DateTime.now().year - 2 + i;
+                            return DropdownMenuItem(
+                                value: y, child: Text("$y"));
+                          }),
+                          onChanged: (v) {
+                            selectedYear = v!;
+                            _loadFuture = fetchEmotionData();
+                            setState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+
+                    /// ✅ 没资料
+                    if (total == 0)
+                      const Expanded(
+                        child:
+                        Center(child: Text("No data for this month.")),
+                      )
+
+                    /// ✅ 有资料 → Pie + Line + Stats + GPT
+                    else
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            children: [
+                              SizedBox(
+                                height: 250,
+                                child: PieChart(
+                                  PieChartData(
+                                    sections: [
+                                      _pieSection("happy", ratios["happy"]!,
+                                          const Color(0xFF9FE2BF)),
+                                      _pieSection("sad", ratios["sad"]!,
+                                          const Color(0xFFAEC6CF)),
+                                      _pieSection("angry", ratios["angry"]!,
+                                          const Color(0xFFF4C2C2)),
+                                      _pieSection("neutral", ratios["neutral"]!,
+                                          const Color(0xFFDCDCDC)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+
+                              const SizedBox(height: 10),
+
+                              /// ✅ Version B 曲线 & 点击弹窗
+                              _buildEmotionLineChart(),
+
+                              const SizedBox(height: 10),
+                              _buildSummaryCards(),
+                              const SizedBox(height: 10),
+                              _emotionStatList(ratios),
+
+                              const SizedBox(height: 8),
+                              Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: isLoadingSuggestion
+                                    ? const CircularProgressIndicator()
+                                    : Text(
+                                  gptSuggestion,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                      fontStyle: FontStyle.italic,
+                                      fontSize: 13),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
             ),
+          ),
+        ],
+      ),
+
+      /// ✅ Bottom Nav
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _tabIndex,
+        onTap: (i) {
+          if (i == _tabIndex) return;
+          setState(() => _tabIndex = i);
+          switch (i) {
+            case 0:
+              Navigator.pushReplacementNamed(context, '/home');
+              break;
+            case 1:
+              Navigator.pushReplacementNamed(context, '/chats');
+              break;
+            case 2:
+              break;
+            case 3:
+              Navigator.pushReplacementNamed(context, '/settings');
+              break;
+          }
+        },
+        type: BottomNavigationBarType.fixed,
+        backgroundColor: const Color(0xFFFFF7E9),
+        selectedItemColor: const Color(0xFF8B6B4A),
+        unselectedItemColor: const Color(0xFF5E4631),
+        items: const [
+          BottomNavigationBarItem(
+              icon: Icon(Icons.home_rounded), label: 'Homepage'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.chat_bubble_rounded), label: 'Chats'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.insights_rounded), label: 'Chart'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.settings_rounded), label: 'Settings'),
+        ],
+      ),
+    );
+  }
+
+  /// ✅ PieChart Section builder
+  PieChartSectionData _pieSection(
+      String emotion, double ratio, Color color) {
+    if (ratio == 0) return PieChartSectionData(value: 0);
+    return PieChartSectionData(
+      color: color,
+      value: ratio * 100,
+      title: emotion[0].toUpperCase() + emotion.substring(1),
+      radius: 120,
+      titleStyle:
+      const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+    );
+  }
+
+  /// ✅ Summary Cards
+  Widget _buildSummaryCards() {
+    final totalChats = totalEmotionCounts.values.fold(0, (a, b) => a + b);
+    final mostFrequent = totalEmotionCounts.entries
+        .reduce((a, b) => a.value >= b.value ? a : b);
+    final activeDays = dailyEmotionCounts.length;
+
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        _summaryCard("Total Chats", "$totalChats"),
+        _summaryCard("Top Emotion", mostFrequent.key),
+        _summaryCard("Active Days", "$activeDays"),
+      ],
+    );
+  }
+
+  Widget _summaryCard(String title, String value) {
+    return Expanded(
+      child: Card(
+        color: const Color(0xFFFFF7E9),
+        elevation: 2,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            children: [
+              Text(value,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.bold, fontSize: 16)),
+              Text(title, style: const TextStyle(fontSize: 12)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// ✅ 小列表统计
+  Widget _emotionStatList(Map<String, double> ratios) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12),
+      color: const Color(0xFFFFF7E9),
+      elevation: 2,
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          children: [
+            _emotionRow("happy", "assets/images/happy_cat.png", ratios),
+            _emotionRow("sad", "assets/images/sad_cat.png", ratios),
+            _emotionRow("angry", "assets/images/angry_cat.png", ratios),
+            _emotionRow("neutral", "assets/images/neutral_cat.png", ratios),
           ],
         ),
-        child: BottomNavigationBar(
-          currentIndex: _tabIndex,
-          onTap: _onBottomTap,
-          type: BottomNavigationBarType.fixed,
-          backgroundColor: const Color(0xFFFFF7E9),
-          selectedItemColor: const Color(0xFF8B6B4A),
-          unselectedItemColor: const Color(0xFF5E4631).withOpacity(0.6),
-          items: const [
-            BottomNavigationBarItem(
-              icon: Icon(Icons.home_rounded),
-              label: 'Homepage',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.chat_bubble_rounded),
-              label: 'Chats',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.insights_rounded),
-              label: 'Chart',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.settings_rounded),
-              label: 'Settings',
-            ),
-          ],
-        ),
+      ),
+    );
+  }
+
+  Widget _emotionRow(
+      String type, String imagePath, Map<String, double> ratios) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Image.asset(imagePath, width: 24, height: 24),
+          const SizedBox(width: 6),
+          Text(
+            "${type[0].toUpperCase()}${type.substring(1)} "
+                "${(ratios[type]! * 100).toStringAsFixed(1)}% "
+                "(${totalEmotionCounts[type]} times)",
+            style: const TextStyle(fontSize: 13),
+          ),
+        ],
       ),
     );
   }

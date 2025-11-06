@@ -15,6 +15,8 @@ import 'feedback.dart';
 import 'aboutus.dart';
 import 'chart.dart';
 import 'adminhome.dart';
+import 'emotionoverview.dart';
+import 'chatsettings.dart';
 
 // 覆盖 HttpClient，忽略证书错误（仅测试用）
 class MyHttpOverrides extends HttpOverrides {
@@ -64,6 +66,8 @@ class MyApp extends StatelessWidget {
         '/aboutus': (_) => const AboutUsPage(),
         '/chart': (_) => ChartPage(),
         '/adminhome': (_) => AdminHomePage(),
+        '/emotionoverview': (_) => EmotionOverviewPage(),
+        '/chatsettings': (_) => const ChatSettingsPage(chatId: "default_chat"),
       },
     );
   }
