@@ -1,11 +1,3 @@
-// lib/emotion_overview_v3_2_fixed.dart
-// ======================================================
-// Emotion Overview v3.2 (Fixed Edition)
-// - Bars for 0% still visible (min height 0.5%)
-// - Two-day data now draws dashed line
-// - GPT Summary stable + fallback
-// ======================================================
-
 import 'dart:async';
 import 'dart:convert';
 import 'package:firebase_database/firebase_database.dart';
@@ -14,13 +6,12 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
 import 'background_widget.dart';
 
-// ============= GPT Summary config =============
+//  GPT Summary config
 const bool USE_GPT_SUMMARY = true;
 const String OPENAI_API_KEY =
-    "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";
+    "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";
 const String OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 const String OPENAI_MODEL = "gpt-4o-mini";
-// ==============================================
 
 class EmotionOverviewPage extends StatefulWidget {
   const EmotionOverviewPage({Key? key}) : super(key: key);

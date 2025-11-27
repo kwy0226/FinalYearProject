@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -22,7 +23,8 @@ class ChatBoxPage extends StatefulWidget {
 }
 
 class _ChatBoxPageState extends State<ChatBoxPage> {
-  // ===================== BASIC CONFIG =====================
+  // BASIC CONFIGURATION
+  // Using Dio to handle network calls to my Cloud Run backend.
   static const String kApiBase =
       "https://fyp-project-758812934986.asia-southeast1.run.app";
 
@@ -33,35 +35,55 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     headers: {"Content-Type": "application/json"},
   ));
 
+  // Text input controller for user messages
   final TextEditingController _textCtrl = TextEditingController();
+
+  // Scroll controller to auto-scroll to latest chat messages
   final ScrollController _scrollCtrl = ScrollController();
 
+  // Firebase references
   late final String _uid;
   late final DatabaseReference _characterRef;
   late final DatabaseReference _chatRef;
   late final DatabaseReference _messagesRef;
   late final DatabaseReference _metaRef;
 
+  // AI Character (customizable)
   String _aiName = "Companion";
   String _aiGender = "unspecified";
   String _aiBackground = "";
+  // _aiAvatar can be an asset path (e.g. "assets/images/.."), an http(s) URL, or a data:base64 URI
   String _aiAvatar = "assets/images/default_avatar.png";
+
+  // User photo (Base64)
   String? _userPhotoB64;
 
+  // Audio recorder and player
   final rec.AudioRecorder _recorder = rec.AudioRecorder();
   final AudioPlayer _player = AudioPlayer();
+
+  // Recording state
   bool _recording = false;
   Timer? _timer;
   int _recordDuration = 0;
+
+  // Stream for Firebase messages (used by StreamBuilder)
   Stream<DatabaseEvent>? _msgStream;
+
+  // Additional subscriptions to detect aiReply and character changes
+  StreamSubscription<DatabaseEvent>? _msgAddedSub;
+  StreamSubscription<DatabaseEvent>? _msgChangedSub;
+  StreamSubscription<DatabaseEvent>? _characterSub;
 
   @override
   void initState() {
     super.initState();
+    // Get current logged-in user UID
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw StateError("User not signed in.");
     _uid = user.uid;
 
+    // Initialize Firebase paths for character and chat history
     _characterRef =
         FirebaseDatabase.instance.ref("character/$_uid/${widget.chatId}");
     _chatRef =
@@ -69,84 +91,121 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     _messagesRef = _chatRef.child("messages");
     _metaRef = _chatRef.child("meta");
 
-    _ensureCharacter();
-    _loadAvatar();
-    _loadUserPhoto();
-    _subscribeMessages();
+    // Load essential data when chat opens:
+    _subscribeCharacterChanges(); // - keep meta.aiName in sync
+    _subscribeMessageEvents(); // - listen for aiReply additions/changes
+    _ensureCharacter(); // - ensure AI profile exists (but do NOT restore archived meta)
+    _loadAvatar(); // - load AI avatar (meta -> character)
+    _loadUserPhoto(); // - load user profile photo
+
+    // Prepare stream for messages listing
+    _subscribeMessages(); // sets _msgStream which StreamBuilder uses
   }
 
   @override
   void dispose() {
+    // Clean up all controllers, timers and subscriptions
     _textCtrl.dispose();
     _scrollCtrl.dispose();
     _recorder.dispose();
     _player.dispose();
     _timer?.cancel();
+
+    _msgAddedSub?.cancel();
+    _msgChangedSub?.cancel();
+    _characterSub?.cancel();
+
     super.dispose();
   }
 
-  // ===================== FIREBASE INITIALIZATION =====================
-
-  /// Create default AI character info if not exists
+  // FIREBASE INITIALIZATION
+  // INITIALIZING AI CHARACTER (FIRST-TIME SETUP)
+  //
+  // NOTE: Do NOT recreate meta if the chat has been archived (meta removed).
+  // This prevents archived chat nodes from being resurrected when user opens ChatBox.
   Future<void> _ensureCharacter() async {
-    final snap = await _characterRef.get();
-    if (!mounted) return;
+    final charSnap = await _characterRef.get();
+    final metaSnap = await _metaRef.get();
 
-    if (!snap.exists) {
-      final settings = await _askForAiSettings(context);
-      if (settings != null) {
+    // If meta is missing, this chat is considered archived. DO NOT re-create meta.
+    if (!metaSnap.exists) {
+      // We avoid creating meta or writing to meta — prevents accidental "revival".
+      // If we still want to allow a user to unarchive from UI, do that explicitly elsewhere.
+      return;
+    }
+
+    // If character is missing but meta exists, we create character using meta.aiName if available.
+    if (!charSnap.exists) {
+      // Use aiName from meta if present
+      final aiNameFromMeta = metaSnap.child('aiName').value?.toString();
+      final initialAiName = aiNameFromMeta?.isNotEmpty == true ? aiNameFromMeta! : _aiName;
+
+      // Create character node but do NOT change meta's timestamps here beyond what's already present.
+      await _characterRef.set({
+        "aiName": initialAiName,
+        "aiGender": _aiGender,
+        "aiBackground": _aiBackground,
+        "createdAt": ServerValue.timestamp,
+        "updatedAt": ServerValue.timestamp,
+      });
+
+      // Update local state
+      if (!mounted) return;
+      setState(() {
+        _aiName = initialAiName;
+      });
+    } else {
+      // Load existing character settings
+      final snap = charSnap;
+      if (snap.exists) {
+        if (!mounted) return;
         setState(() {
-          _aiName = settings["name"]!;
-          _aiGender = settings["gender"]!;
-          _aiBackground = settings["background"]!;
-        });
-
-        await _characterRef.set({
-          "aiName": _aiName,
-          "aiGender": _aiGender,
-          "aiBackground": _aiBackground,
-          "createdAt": ServerValue.timestamp,
-          "updatedAt": ServerValue.timestamp,
-        });
-
-        await _metaRef.update({
-          "aiName": _aiName,
-          "updatedAt": ServerValue.timestamp,
+          _aiName = (snap.child("aiName").value ?? "Companion").toString();
+          _aiGender = (snap.child("aiGender").value ?? "unspecified").toString();
+          _aiBackground = (snap.child("aiBackground").value ?? "").toString();
         });
       }
-    } else {
-      setState(() {
-        _aiName = (snap.child("aiName").value ?? "Companion").toString();
-        _aiGender = (snap.child("aiGender").value ?? "unspecified").toString();
-        _aiBackground = (snap.child("aiBackground").value ?? "").toString();
-      });
     }
   }
 
-  /// Load AI avatar from Firebase meta
+  // LOAD AI AVATAR
+  //
+  // Priority:
+  // 1) meta.selectedAvatar (if exists)
+  // 2) character.selectedAvatar (if exists) — and write it to meta for future sync
   Future<void> _loadAvatar() async {
-    // First check meta
     final metaSnap = await _metaRef.get();
-    if (metaSnap.child("selectedAvatar").exists) {
-      setState(() {
-        _aiAvatar = metaSnap.child("selectedAvatar").value.toString();
-      });
-      return;
+    if (metaSnap.exists && metaSnap.child("selectedAvatar").exists) {
+      final avatarVal = metaSnap.child("selectedAvatar").value.toString();
+      if (avatarVal.isNotEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _aiAvatar = avatarVal;
+        });
+        return;
+      }
     }
 
     // If meta doesn't have it, check character node
     final charSnap = await _characterRef.get();
-    if (charSnap.child("selectedAvatar").exists) {
-      setState(() {
-        _aiAvatar = charSnap.child("selectedAvatar").value.toString();
-      });
+    if (charSnap.exists && charSnap.child("selectedAvatar").exists) {
+      final avatarVal = charSnap.child("selectedAvatar").value.toString();
+      if (avatarVal.isNotEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _aiAvatar = avatarVal;
+        });
 
-      // Also write to meta for sync next time
-      await _metaRef.update({"selectedAvatar": _aiAvatar});
+        // Also write to meta for sync next time (but only if meta exists; we want to avoid resurrecting archived chats)
+        final metaSnap2 = await _metaRef.get();
+        if (metaSnap2.exists) {
+          await _metaRef.update({"selectedAvatar": _aiAvatar});
+        }
+      }
     }
   }
 
-  /// Load user's own avatar (photoBase64)
+  // LOAD USER PHOTO
   Future<void> _loadUserPhoto() async {
     final snap = await FirebaseDatabase.instance.ref("users/$_uid").get();
     if (snap.child("photoBase64").exists) {
@@ -156,17 +215,94 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     }
   }
 
-  /// Subscribe Firebase messages
+  // SUBSCRIBE TO CHAT MESSAGES IN REALTIME (used by StreamBuilder)
   void _subscribeMessages() {
     _msgStream = _messagesRef.orderByChild("createdAt").onValue;
   }
 
-  // ===================== SEND TEXT =====================
+  // SUBSCRIBE TO NEW MESSAGE EVENTS (child_added and child_changed)
+  // We use these listeners to detect when the backend writes an aiReply
+  // (either as a new child or via update). When aiReply appears, we update meta.lastMessage & meta.updatedAt.
+  void _subscribeMessageEvents() {
+    // child added event: a new user message was pushed
+    _msgAddedSub = _messagesRef.onChildAdded.listen((event) async {
+      final snap = event.snapshot;
+      if (snap.exists) {
+        // If the newly added node already contains aiReply (rare), update meta
+        if (snap.child('aiReply').exists) {
+          final aiContent = snap.child('aiReply/content').value?.toString() ?? '';
+          if (aiContent.isNotEmpty) {
+            await _metaRef.update({
+              "lastMessage": aiContent,
+              "updatedAt": ServerValue.timestamp,
+            });
+          }
+        }
+      }
+    });
+
+    // child changed event: backend may set aiReply on an existing message node
+    _msgChangedSub = _messagesRef.onChildChanged.listen((event) async {
+      final snap = event.snapshot;
+      if (snap.exists && snap.child('aiReply').exists) {
+        final aiContent = snap.child('aiReply/content').value?.toString() ?? '';
+        if (aiContent.isNotEmpty) {
+          await _metaRef.update({
+            "lastMessage": aiContent,
+            "updatedAt": ServerValue.timestamp,
+          });
+        }
+      }
+    });
+  }
+
+  // SUBSCRIBE TO CHARACTER CHANGES
+  // Keep meta.aiName in sync when user edits AI name in ChatSettings.
+  void _subscribeCharacterChanges() {
+    _characterSub = _characterRef.onValue.listen((event) async {
+      final snap = event.snapshot;
+      if (!snap.exists) return;
+
+      final newName = snap.child('aiName').value?.toString();
+      if (newName != null && newName.isNotEmpty) {
+        // Update local state so AppBar shows latest name
+        if (!mounted) return;
+        setState(() {
+          _aiName = newName;
+        });
+
+        // Update meta.aiName if meta exists (do not create meta if it's missing)
+        final metaSnap = await _metaRef.get();
+        if (metaSnap.exists) {
+          await _metaRef.update({
+            "aiName": newName,
+            "updatedAt": ServerValue.timestamp,
+          });
+        }
+      }
+
+      // Also check selectedAvatar in character and sync to meta if meta exists
+      final charAvatar = snap.child('selectedAvatar').value?.toString();
+      if (charAvatar != null && charAvatar.isNotEmpty) {
+        final metaSnap = await _metaRef.get();
+        if (metaSnap.exists) {
+          await _metaRef.update({"selectedAvatar": charAvatar});
+          if (!mounted) return;
+          setState(() {
+            _aiAvatar = charAvatar;
+          });
+        }
+      }
+    });
+  }
+
+  // SEND TEXT
   Future<void> _sendText() async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
     _textCtrl.clear();
 
+    // Create new message node
     final msgRef = _messagesRef.push(); // Add one more message
     final timestamp = DateTime.now().millisecondsSinceEpoch;
 
@@ -177,6 +313,8 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
       "createdAt": timestamp, // Timestamps facilitate sorting
     });
 
+    // Update chat meta (last message preview) to user's message right away
+    // The message will be replaced/updated by the AI reply when backend responds (listener will update meta again)
     await _metaRef.update({
       "lastMessage": text,
       "updatedAt": ServerValue.timestamp,
@@ -194,18 +332,68 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
         "msgId": msgRef.key,
       });
     } catch (_) {
+      // If backend fails, show placeholder AI reply and update meta
+      final placeholder = "(...)";
       await msgRef.update({
         "aiReply": {
           "role": "assistant",
           "type": "text",
-          "content": "(...)",
+          "content": placeholder,
           "createdAt": ServerValue.timestamp,
         }
+      });
+      await _metaRef.update({
+        "lastMessage": placeholder,
+        "updatedAt": ServerValue.timestamp,
       });
     }
   }
 
-  // ===================== UI =====================
+  // SEND AUDIO (voice)
+  Future<void> _sendVoice(String filePath, int duration) async {
+    final msgRef = _messagesRef.push();
+
+    await msgRef.set({
+      "role": "user",
+      "type": "audio",
+      "content": "(voice $duration s)",
+      "localPath": filePath,
+      "createdAt": DateTime.now().millisecondsSinceEpoch,
+    });
+
+    await _metaRef.update({
+      "lastMessage": "(voice)",
+      "updatedAt": ServerValue.timestamp,
+    });
+
+    try {
+      final bytes = await File(filePath).readAsBytes();
+      final String b64 = base64.encode(bytes);
+
+      await _dio.post("/audio/process", data: {
+        "wav_base64": "data:audio/wav;base64,$b64",
+        "uid": _uid,
+        "chatId": widget.chatId,
+        "msgId": msgRef.key,
+      });
+    } catch (_) {
+      final placeholder = "(...)";
+      await msgRef.update({
+        "aiReply": {
+          "role": "assistant",
+          "type": "text",
+          "content": placeholder,
+          "createdAt": ServerValue.timestamp,
+        }
+      });
+      await _metaRef.update({
+        "lastMessage": placeholder,
+        "updatedAt": ServerValue.timestamp,
+      });
+    }
+  }
+
+  // MAIN UI BUILD
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -215,9 +403,8 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
           builder: (context, snapshot) {
             String name = _aiName;
             if (snapshot.hasData && snapshot.data!.snapshot.exists) {
-              name =
-                  (snapshot.data!.snapshot.child("aiName").value ?? "Companion")
-                      .toString();
+              name = (snapshot.data!.snapshot.child("aiName").value ?? "Companion")
+                  .toString();
             }
             return Text(name,
                 style: const TextStyle(
@@ -255,7 +442,7 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     );
   }
 
-  // ===================== CHAT LIST + AVATARS =====================
+  // BUILD CHAT MESSAGE LIST
   Widget _buildMessages() {
     return StreamBuilder(
       stream: _msgStream, // Listen from Firebase Realtime Database
@@ -266,27 +453,48 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
           final data = snap.data!.snapshot;
 
           for (final m in data.children) {
-            // Read messages sent by the user
-            messages.add({
+            // Each push key usually represents a user message node.
+            final userMsgMap = <String, dynamic>{
               "role": m.child("role").value,
               "type": m.child("type").value,
               "content": m.child("content").value,
               "localPath": m.child("localPath").value,
               "createdAt": m.child("createdAt").value,
-            });
+            };
 
-            // ai reply
+            // Convert createdAt to int if possible
+            final createdAtUser = (userMsgMap["createdAt"] is int)
+                ? userMsgMap["createdAt"] as int
+                : int.tryParse(userMsgMap["createdAt"]?.toString() ?? "0") ?? 0;
+
+            userMsgMap["createdAt"] = createdAtUser;
+            messages.add(userMsgMap);
+
+            // If aiReply exists inside this message node, treat it as a separate message item
             if (m.child("aiReply").exists) {
+              final aiCreatedAtRaw = m.child("aiReply/createdAt").value;
+              final aiCreatedAt = (aiCreatedAtRaw is int)
+                  ? aiCreatedAtRaw
+                  : int.tryParse(aiCreatedAtRaw?.toString() ?? "0") ?? 0;
+
               messages.add({
                 "role": m.child("aiReply/role").value,
                 "type": m.child("aiReply/type").value,
                 "content": m.child("aiReply/content").value,
-                "createdAt": m.child("aiReply/createdAt").value,
+                "createdAt": aiCreatedAt,
               });
             }
           }
+
+          // IMPORTANT: Sort messages by createdAt ascending so order is correct
+          messages.sort((a, b) {
+            final aTs = (a["createdAt"] is int) ? a["createdAt"] as int : 0;
+            final bTs = (b["createdAt"] is int) ? b["createdAt"] as int : 0;
+            return aTs.compareTo(bTs);
+          });
         }
 
+        // Auto-scroll to newest message after widget build
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_scrollCtrl.hasClients) {
             _scrollCtrl.animateTo(
@@ -307,7 +515,7 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
             final type = msg["type"];
             Widget contentWidget;
 
-            // Voice message
+            // Voice message bubble
             if (type == "audio") {
               final path = msg["localPath"]?.toString();
               contentWidget = Row(children: [
@@ -322,6 +530,7 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
                     style: const TextStyle(color: Colors.black)),
               ]);
             } else {
+              // Text message bubble
               contentWidget = Text(
                 (msg["content"] ?? '').toString(),
                 style: TextStyle(
@@ -336,17 +545,19 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     );
   }
 
-  /// Single message row with avatar
+  // MESSAGE ROW WITH AVATAR + BUBBLE
   Widget _chatRow({required bool isMe, required Widget child}) {
     final avatar = isMe
         ? (_userPhotoB64 == null
         ? const CircleAvatar(radius: 16, child: Icon(Icons.person))
         : CircleAvatar(
-        radius: 16,
-        backgroundImage: MemoryImage(
-          base64Decode(_userPhotoB64!.split(',').last),
-        )))
-        : CircleAvatar(radius: 16, backgroundImage: AssetImage(_aiAvatar));
+      radius: 16,
+      backgroundImage: MemoryImage(
+        // The stored Base64 might include "data:...;base64," prefix; handle it.
+        base64Decode(_userPhotoB64!.split(',').last),
+      ),
+    ))
+        : _buildAiAvatarCircle();
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -365,7 +576,57 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     );
   }
 
-  /// Chat bubble UI
+  // Helper to produce AI avatar CircleAvatar supporting assets, network and data: URIs
+  Widget _buildAiAvatarCircle() {
+    final provider = _imageProviderFromString(_aiAvatar);
+    if (provider != null) {
+      return CircleAvatar(radius: 16, backgroundImage: provider);
+    } else {
+      // Fallback: initial letter avatar using _aiName
+      final initial = _aiName.isNotEmpty ? _aiName[0].toUpperCase() : 'C';
+      return CircleAvatar(
+        radius: 16,
+        backgroundColor: const Color(0xFFDECDBE),
+        child: Text(
+          initial,
+          style: const TextStyle(
+            color: Color(0xFF5E4631),
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      );
+    }
+  }
+
+  // Convert a string to an ImageProvider:
+  // - if starts with http(s) -> NetworkImage
+  // - if starts with 'data:' -> decode base64 to MemoryImage
+  // - otherwise assume it's an asset path -> AssetImage
+  ImageProvider? _imageProviderFromString(String path) {
+    try {
+      if (path.isEmpty) return null;
+      final trimmed = path.trim();
+      if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+        return NetworkImage(trimmed);
+      }
+      if (trimmed.startsWith("data:")) {
+        // data URI like: data:image/png;base64,AAAABBBB...
+        final parts = trimmed.split(',');
+        if (parts.length == 2) {
+          final b64 = parts[1];
+          final bytes = base64.decode(b64);
+          return MemoryImage(bytes);
+        }
+        return null;
+      }
+      // Default: treat as local asset path
+      return AssetImage(trimmed);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // CHAT BUBBLE (GREEN FOR USER, WHITE FOR AI)
   Widget _bubble({required bool isMe, required Widget child}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -383,28 +644,23 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     );
   }
 
-  // ===================== INPUT BAR =====================
+  // TEXT INPUT BAR + SEND ICON
   Widget _buildInputBar() {
     return SafeArea(
       child: Row(children: [
-        IconButton(
-            icon: const Icon(Icons.mic, color: Colors.brown),
-            onPressed: _startRecording),
+        IconButton(icon: const Icon(Icons.mic, color: Colors.brown), onPressed: _startRecording),
         Expanded(
             child: TextField(
               controller: _textCtrl,
-              decoration: const InputDecoration(
-                  hintText: "Type a message...", border: OutlineInputBorder()),
+              decoration: const InputDecoration(hintText: "Type a message...", border: OutlineInputBorder()),
               onSubmitted: (_) => _sendText(),
             )),
-        IconButton(
-            icon: const Icon(Icons.send, color: Colors.brown),
-            onPressed: _sendText),
+        IconButton(icon: const Icon(Icons.send, color: Colors.brown), onPressed: _sendText),
       ]),
     );
   }
 
-  // ===================== RECORDING BAR =====================
+  // RECORDING BAR UI
   Widget _buildRecordingBar() {
     return Container(
       color: Colors.red[50],
@@ -412,17 +668,13 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
       child: Row(children: [
         Text("Recording: $_recordDuration s"),
         const Spacer(),
-        IconButton(
-            icon: const Icon(Icons.stop, color: Colors.red),
-            onPressed: () => _stopRecording()),
-        IconButton(
-            icon: const Icon(Icons.delete, color: Colors.grey),
-            onPressed: () => _stopRecording(cancel: true)),
+        IconButton(icon: const Icon(Icons.stop, color: Colors.red), onPressed: () => _stopRecording()),
+        IconButton(icon: const Icon(Icons.delete, color: Colors.grey), onPressed: () => _stopRecording(cancel: true)),
       ]),
     );
   }
 
-  // ===================== AUDIO FUNCTIONS =====================
+  // START AUDIO RECORDING
   Future<void> _startRecording() async {
     final hasPerm = await _recorder.hasPermission();
     if (!hasPerm) {
@@ -471,50 +723,10 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
     await _sendVoice(path, _recordDuration);
   }
 
-  Future<void> _sendVoice(String filePath, int duration) async {
-    final msgRef = _messagesRef.push();
-
-    await msgRef.set({
-      "role": "user",
-      "type": "audio",
-      "content": "(voice $duration s)",
-      "localPath": filePath,
-      "createdAt": DateTime.now().millisecondsSinceEpoch,
-    });
-
-    await _metaRef.update({
-      "lastMessage": "(voice)",
-      "updatedAt": ServerValue.timestamp,
-    });
-
-    try {
-      final bytes = await File(filePath).readAsBytes();
-      final String b64 = base64.encode(bytes);
-
-      await _dio.post("/audio/process", data: {
-        "wav_base64": "data:audio/wav;base64,$b64",
-        "uid": _uid,
-        "chatId": widget.chatId,
-        "msgId": msgRef.key,
-      });
-    } catch (_) {
-      await msgRef.update({
-        "aiReply": {
-          "role": "assistant",
-          "type": "text",
-          "content": "(...)",
-          "createdAt": ServerValue.timestamp,
-        }
-      });
-    }
-  }
-
   // ===================== AI SETTINGS POPUP =====================
   Future<Map<String, String>?> _askForAiSettings(BuildContext context) async {
-    final TextEditingController nameCtrl =
-    TextEditingController(text: _aiName);
-    final TextEditingController bgCtrl =
-    TextEditingController(text: _aiBackground);
+    final TextEditingController nameCtrl = TextEditingController(text: _aiName);
+    final TextEditingController bgCtrl = TextEditingController(text: _aiBackground);
     String gender = _aiGender;
 
     return showDialog(
@@ -523,28 +735,20 @@ class _ChatBoxPageState extends State<ChatBoxPage> {
       builder: (c) => AlertDialog(
         title: const Text("Set your AI character"),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
-              controller: nameCtrl,
-              decoration: const InputDecoration(labelText: "AI Name")),
+          TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: "AI Name")),
           DropdownButtonFormField<String>(
             value: gender,
             items: const [
-              DropdownMenuItem(
-                  value: "unspecified", child: Text("Unspecified")),
+              DropdownMenuItem(value: "unspecified", child: Text("Unspecified")),
               DropdownMenuItem(value: "male", child: Text("Male")),
               DropdownMenuItem(value: "female", child: Text("Female")),
             ],
             onChanged: (v) => gender = v ?? "unspecified",
           ),
-          TextField(
-              controller: bgCtrl,
-              maxLines: 3,
-              decoration: const InputDecoration(labelText: "AI Background")),
+          TextField(controller: bgCtrl, maxLines: 3, decoration: const InputDecoration(labelText: "AI Background")),
         ]),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(c),
-              child: const Text("Cancel")),
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text("Cancel")),
           FilledButton(
               onPressed: () {
                 Navigator.pop(c, {

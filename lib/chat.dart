@@ -16,23 +16,31 @@ class ChatsPage extends StatefulWidget {
 class _ChatsPageState extends State<ChatsPage> {
   final _auth = FirebaseAuth.instance;
 
+  // The current user's UID
   late final String _uid;
+  // Reference to the user's chat list in Firebase Realtime Database
   late final DatabaseReference _chatsRef;
 
+  // Stream that listens to chat list changes
   Stream<DatabaseEvent>? _chatsStream;
   int _tabIndex = 1;
 
   @override
   void initState() {
     super.initState();
+    // Get currently signed-in user
     final user = _auth.currentUser;
     if (user == null) throw StateError('User not signed in.');
     _uid = user.uid;
 
+    // chathistory/<uid> — This is the list of conversations for this user
     _chatsRef = FirebaseDatabase.instance.ref('chathistory/$_uid');
+
+    // Listen for changes sorted by meta/updatedAt
     _chatsStream = _chatsRef.orderByChild('meta/updatedAt').onValue;
   }
 
+  // CREATE NEW CHAT ROOM
   Future<void> _createNewChat() async {
     final newChat = _chatsRef.push();
     await newChat.child('meta').set({
@@ -44,6 +52,7 @@ class _ChatsPageState extends State<ChatsPage> {
     });
 
     if (!mounted) return;
+
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -52,6 +61,7 @@ class _ChatsPageState extends State<ChatsPage> {
     );
   }
 
+  // CHAT OPTIONS (PIN / DELETE)
   void _showChatOptionsDialog(String chatId, bool pinned) {
     showDialog(
       context: context,
@@ -80,11 +90,23 @@ class _ChatsPageState extends State<ChatsPage> {
     );
   }
 
+  // Archive chat instead of deleting messages
   Future<void> _deleteChat(String chatId) async {
-    await _chatsRef.child(chatId).remove();
+    final chatPath = FirebaseDatabase.instance.ref('chathistory/$_uid/$chatId');
+    final archivePath =
+    FirebaseDatabase.instance.ref('archivedchathistory/$_uid/$chatId');
+
+    final snap = await chatPath.get();
+    if (snap.exists) {
+      await archivePath.set(snap.value);
+      await chatPath.child('meta').remove(); // Hide chat from list
+    }
+
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text("Chat deleted")));
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("Chat archived")),
+    );
   }
 
   Future<void> _pinChat(String chatId) async {
@@ -95,6 +117,7 @@ class _ChatsPageState extends State<ChatsPage> {
     await _chatsRef.child(chatId).child('meta').update({'pinned': false});
   }
 
+  // BOTTOM NAVIGATION HANDLER
   void _onBottomTap(int index) {
     if (index == _tabIndex) return;
     setState(() => _tabIndex = index);
@@ -114,6 +137,7 @@ class _ChatsPageState extends State<ChatsPage> {
     }
   }
 
+  // UI BUILD
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -136,48 +160,71 @@ class _ChatsPageState extends State<ChatsPage> {
 
                       if (snapshot.hasData) {
                         final snap = snapshot.data!.snapshot;
+
                         for (final chat in snap.children) {
                           final id = chat.key!;
                           final meta = chat.child("meta");
 
+                          // Skip chats with no meta (archived)
+                          if (!meta.exists) continue;
+
+                          final avatar =
+                          (meta.child("selectedAvatar").value ?? "")
+                              .toString();
+
                           items.add(_ChatListItem(
                             chatId: id,
-                            aiName: (meta.child("aiName").value ?? "Companion").toString(),
-                            lastMessage: (meta.child("lastMessage").value ?? "").toString(),
-                            updatedAt: (meta.child("updatedAt").value ?? 0) as int,
-                            pinned: (meta.child("pinned").value ?? false) == true,
+                            aiName:
+                            (meta.child("aiName").value ?? "Companion")
+                                .toString(),
+                            lastMessage:
+                            (meta.child("lastMessage").value ?? "")
+                                .toString(),
+                            updatedAt:
+                            (meta.child("updatedAt").value ?? 0) as int,
+                            pinned:
+                            (meta.child("pinned").value ?? false) == true,
+                            selectedAvatar: avatar,
                           ));
                         }
 
+                        // Sorting pinned → recent
                         items.sort((a, b) {
                           if (a.pinned && !b.pinned) return -1;
                           if (!a.pinned && b.pinned) return 1;
                           return b.updatedAt.compareTo(a.updatedAt);
                         });
-                      }
 
-                      if (items.isEmpty) {
-                        return const Center(
-                          child: Text(
-                            "No conversations yet.\nTap the + button to start one!",
-                            textAlign: TextAlign.center,
-                            style: TextStyle(fontSize: 16, color: Color(0xFF5E4631)),
-                          ),
+                        if (items.isEmpty) {
+                          return const Center(
+                            child: Text(
+                              "No conversations yet.\nTap the + button to start one!",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Color(0xFF5E4631),
+                              ),
+                            ),
+                          );
+                        }
+
+                        return ListView.separated(
+                          padding: const EdgeInsets.all(12),
+                          separatorBuilder: (_, __) =>
+                          const SizedBox(height: 8),
+                          itemCount: items.length,
+                          itemBuilder: (context, i) {
+                            final item = items[i];
+                            return GestureDetector(
+                              onLongPress: () =>
+                                  _showChatOptionsDialog(item.chatId, item.pinned),
+                              child: _buildChatTile(item),
+                            );
+                          },
                         );
                       }
 
-                      return ListView.separated(
-                        padding: const EdgeInsets.all(12),
-                        separatorBuilder: (_, __) => const SizedBox(height: 8),
-                        itemCount: items.length,
-                        itemBuilder: (context, i) {
-                          final item = items[i];
-                          return GestureDetector(
-                            onLongPress: () => _showChatOptionsDialog(item.chatId, item.pinned),
-                            child: _buildChatTile(item),
-                          );
-                        },
-                      );
+                      return const Center(child: CircularProgressIndicator());
                     },
                   ),
                 ),
@@ -186,20 +233,58 @@ class _ChatsPageState extends State<ChatsPage> {
           ),
         ],
       ),
+
       floatingActionButton: FloatingActionButton(
         backgroundColor: const Color(0xFFB08968),
         foregroundColor: Colors.white,
         onPressed: _createNewChat,
         child: const Icon(Icons.add),
       ),
+
       bottomNavigationBar: _buildNavBar(),
+    );
+  }
+
+  // Supports both asset avatars AND network avatars.
+  Widget _buildAvatar(_ChatListItem item) {
+    if (item.selectedAvatar.isNotEmpty) {
+      // FIX: If avatar starts with assets/, use AssetImage
+      if (item.selectedAvatar.startsWith("assets/")) {
+        return CircleAvatar(
+          radius: 22,
+          backgroundImage: AssetImage(item.selectedAvatar),
+        );
+      }
+
+      // Otherwise treat as network image (Firebase Storage URL)
+      return CircleAvatar(
+        radius: 22,
+        backgroundImage: NetworkImage(item.selectedAvatar),
+      );
+    }
+
+    final initial =
+    item.aiName.isNotEmpty ? item.aiName[0].toUpperCase() : 'C';
+
+    return CircleAvatar(
+      radius: 22,
+      backgroundColor: const Color(0xFFDECDBE),
+      child: Text(
+        initial,
+        style: const TextStyle(
+          color: Color(0xFF5E4631),
+          fontWeight: FontWeight.bold,
+        ),
+      ),
     );
   }
 
   Widget _buildChatTile(_ChatListItem item) {
     return Container(
       decoration: BoxDecoration(
-        color: item.pinned ? const Color(0xFFF1EDE5) : Colors.white.withOpacity(0.92),
+        color: item.pinned
+            ? const Color(0xFFF1EDE5)
+            : Colors.white.withOpacity(0.92),
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
@@ -216,7 +301,7 @@ class _ChatsPageState extends State<ChatsPage> {
             builder: (_) => ChatBoxPage(chatId: item.chatId),
           ),
         ),
-        leading: _avatarFromName(item.aiName),
+        leading: _buildAvatar(item),
         title: Row(
           children: [
             Expanded(
@@ -243,21 +328,6 @@ class _ChatsPageState extends State<ChatsPage> {
         trailing: Text(
           _friendlyTime(item.updatedAt),
           style: const TextStyle(fontSize: 12, color: Color(0xFF5E4631)),
-        ),
-      ),
-    );
-  }
-
-  Widget _avatarFromName(String name) {
-    final initial = name.isNotEmpty ? name[0].toUpperCase() : 'C';
-    return CircleAvatar(
-      radius: 22,
-      backgroundColor: const Color(0xFFDECDBE),
-      child: Text(
-        initial,
-        style: const TextStyle(
-          color: Color(0xFF5E4631),
-          fontWeight: FontWeight.bold,
         ),
       ),
     );
@@ -299,10 +369,14 @@ class _ChatsPageState extends State<ChatsPage> {
         selectedItemColor: const Color(0xFF8B6B4A),
         unselectedItemColor: const Color(0xFF5E4631).withOpacity(0.6),
         items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home_rounded), label: "Homepage"),
-          BottomNavigationBarItem(icon: Icon(Icons.chat_bubble_rounded), label: "Chats"),
-          BottomNavigationBarItem(icon: Icon(Icons.insights_rounded), label: "Chart"),
-          BottomNavigationBarItem(icon: Icon(Icons.settings_rounded), label: "Settings"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.home_rounded), label: "Homepage"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.chat_bubble_rounded), label: "Chats"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.insights_rounded), label: "Chart"),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.settings_rounded), label: "Settings"),
         ],
       ),
     );
@@ -315,12 +389,16 @@ class _ChatsPageState extends State<ChatsPage> {
 
     String two(int n) => n.toString().padLeft(2, '0');
 
-    if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
+    if (dt.year == now.year &&
+        dt.month == now.month &&
+        dt.day == now.day) {
       return "${two(dt.hour)}:${two(dt.minute)}";
     }
 
     final y = now.subtract(const Duration(days: 1));
-    if (dt.year == y.year && dt.month == y.month && dt.day == y.day) {
+    if (dt.year == y.year &&
+        dt.month == y.month &&
+        dt.day == y.day) {
       return "Yesterday";
     }
 
@@ -334,6 +412,7 @@ class _ChatListItem {
   final String lastMessage;
   final int updatedAt;
   final bool pinned;
+  final String selectedAvatar;
 
   _ChatListItem({
     required this.chatId,
@@ -341,5 +420,6 @@ class _ChatListItem {
     required this.lastMessage,
     required this.updatedAt,
     required this.pinned,
+    required this.selectedAvatar,
   });
 }

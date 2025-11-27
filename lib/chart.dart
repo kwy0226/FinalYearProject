@@ -6,8 +6,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:http/http.dart' as http;
 import 'background_widget.dart';
 
-/// ✅ 填自己的 Key
-const String openAIApiKey = "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";
+const String openAIApiKey = "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";
 
 class ChartPage extends StatefulWidget {
   const ChartPage({Key? key}) : super(key: key);
@@ -20,7 +19,7 @@ class _ChartPageState extends State<ChartPage> {
   final _auth = FirebaseAuth.instance;
   final _db = FirebaseDatabase.instance.ref();
 
-  /// Daily Statistics (for PieChart)
+  // Daily Statistics (for PieChart)
   final Map<String, Map<String, int>> dailyEmotionCounts = {};
   final Map<String, int> totalEmotionCounts = {
     "happy": 0,
@@ -29,7 +28,7 @@ class _ChartPageState extends State<ChartPage> {
     "neutral": 0,
   };
 
-  /// Time series for line charts
+  // Time series for line charts
   final List<Map<String, dynamic>> messageTimeline = [];
 
   int _tabIndex = 2;
@@ -56,7 +55,7 @@ class _ChartPageState extends State<ChartPage> {
     _loadFuture = fetchEmotionData();
   }
 
-  /// Read Firebase Sentiment Data + Timeline
+  // Read Firebase Sentiment Data + Timeline
   Future<void> fetchEmotionData() async {
     final user = _auth.currentUser;
     if (user == null) return;
@@ -67,74 +66,87 @@ class _ChartPageState extends State<ChartPage> {
 
     try {
       final uid = user.uid;
-      final snapshot = await _db.child("chathistory/$uid").get();
 
-      if (snapshot.exists) {
-        final data = snapshot.value as Map<dynamic, dynamic>;
+      // --- Added for archive support ---
+      // We load both active chats and archived chats so deleted conversations
+      // will still appear in the emotion chart.
+      final activeSnap = await _db.child("chathistory/$uid").get();
+      final archivedSnap = await _db.child("archivedchathistory/$uid").get();
 
-        for (final chatEntry in data.entries) {
-          final messages = chatEntry.value['messages'];
+      // Combined results from both active & archived
+      final Map<dynamic, dynamic> combinedData = {};
 
-          if (messages is Map) {
-            for (final msgEntry in messages.entries) {
-              final msg = msgEntry.value;
+      if (activeSnap.exists) {
+        combinedData.addAll(activeSnap.value as Map<dynamic, dynamic>);
+      }
 
-              if (msg is Map && msg['emotion'] != null) {
-                final createdAt = msg['createdAt'];
-                if (createdAt == null) continue;
+      if (archivedSnap.exists) {
+        combinedData.addAll(archivedSnap.value as Map<dynamic, dynamic>);
+      }
+      // --- End of added section ---
 
-                final createdDate =
-                DateTime.fromMillisecondsSinceEpoch(createdAt);
+      // Process all chat messages (from both active and archived)
+      for (final chatEntry in combinedData.entries) {
+        final messages = chatEntry.value['messages'];
 
-                if (createdDate.isAfter(DateTime.now())) continue;
-                if (createdDate.month != selectedMonth ||
-                    createdDate.year != selectedYear) continue;
+        if (messages is Map) {
+          for (final msgEntry in messages.entries) {
+            final msg = msgEntry.value;
 
-                final rawLabel =
-                (msg['emotion']['label'] ?? "").toString().toLowerCase();
+            if (msg is Map && msg['emotion'] != null) {
+              final createdAt = msg['createdAt'];
+              if (createdAt == null) continue;
 
-                String? label;
-                if (rawLabel == "joy")
-                  label = "happy";
-                else if (["sad", "angry", "neutral"].contains(rawLabel))
-                  label = rawLabel;
-                if (label == null) continue;
+              final createdDate =
+              DateTime.fromMillisecondsSinceEpoch(createdAt);
 
-                /// PieChart
-                final dateStr = createdDate.toString().substring(0, 10);
-                dailyEmotionCounts.putIfAbsent(dateStr, () =>
-                {
-                  "happy": 0,
-                  "sad": 0,
-                  "angry": 0,
-                  "neutral": 0,
-                });
-                dailyEmotionCounts[dateStr]![label] =
-                    dailyEmotionCounts[dateStr]![label]! + 1;
+              if (createdDate.isAfter(DateTime.now())) continue;
+              if (createdDate.month != selectedMonth ||
+                  createdDate.year != selectedYear) continue;
 
-                totalEmotionCounts[label] = totalEmotionCounts[label]! + 1;
+              final rawLabel =
+              (msg['emotion']['label'] ?? "").toString().toLowerCase();
 
-                /// Line Chart
-                messageTimeline.add({
-                  "time": createdDate,
-                  "text": msg["content"] ?? "",
-                  "emotion": label,
-                });
-              }
+              String? label;
+              if (rawLabel == "joy")
+                label = "happy";
+              else if (["sad", "angry", "neutral"].contains(rawLabel))
+                label = rawLabel;
+              if (label == null) continue;
+
+              // PieChart
+              final dateStr = createdDate.toString().substring(0, 10);
+              dailyEmotionCounts.putIfAbsent(dateStr, () => {
+                "happy": 0,
+                "sad": 0,
+                "angry": 0,
+                "neutral": 0,
+              });
+              dailyEmotionCounts[dateStr]![label] =
+                  dailyEmotionCounts[dateStr]![label]! + 1;
+
+              totalEmotionCounts[label] = totalEmotionCounts[label]! + 1;
+
+              // Line Chart
+              messageTimeline.add({
+                "time": createdDate,
+                "text": msg["content"] ?? "",
+                "emotion": label,
+              });
             }
           }
         }
       }
 
-      /// Time Sorting (required for line charts)
-      messageTimeline.sort((a, b) =>
-          a["time"].compareTo(b["time"]));
+      // Time Sorting (required for line charts)
+      messageTimeline.sort((a, b) => a["time"].compareTo(b["time"]));
+
     } catch (_) {}
 
     await _generateGptSuggestion();
   }
 
-  /// PieChart Ratio
+  // PieChart Ratio
   Map<String, double> calculateRatios() {
     final total = totalEmotionCounts.values.fold(0, (a, b) => a + b);
     if (total == 0) {
@@ -148,7 +160,7 @@ class _ChartPageState extends State<ChartPage> {
     };
   }
 
-  /// emotion converted to height (line chart Y-axis)
+  // emotion converted to height (line chart Y-axis)
   double emotionScore(String e) {
     switch (e) {
       case "happy":
@@ -163,7 +175,7 @@ class _ChartPageState extends State<ChartPage> {
     return 0;
   }
 
-  /// Line Chart Point
+  // Line Chart Point
   List<FlSpot> _buildLineSpots() {
     List<FlSpot> spots = [];
     for (int i = 0; i < messageTimeline.length; i++) {
@@ -174,7 +186,7 @@ class _ChartPageState extends State<ChartPage> {
     return spots;
   }
 
-  /// LineChart with popup dialog
+  // LineChart with popup dialog
   Widget _buildEmotionLineChart() {
     if (messageTimeline.isEmpty) return const SizedBox();
 
@@ -201,7 +213,7 @@ class _ChartPageState extends State<ChartPage> {
                 maxY: 3,
                 gridData: FlGridData(show: true),
 
-                /// Click here → Pop-up window displays full content
+                // Click here → Pop-up window displays full content
                 lineTouchData: LineTouchData(
                   handleBuiltInTouches: true,
                   touchCallback: (event, response) {
@@ -275,7 +287,7 @@ class _ChartPageState extends State<ChartPage> {
     );
   }
 
-  /// GPT Summary
+  // GPT Summary
   Future<void> _generateGptSuggestion() async {
     final mostFrequent =
     totalEmotionCounts.entries.reduce((a, b) => a.value >= b.value ? a : b);
@@ -370,7 +382,7 @@ class _ChartPageState extends State<ChartPage> {
                     const Divider(
                         color: Color(0xFFB08968), indent: 20, endIndent: 20),
 
-                    /// Month Selection
+                    // Month Selection
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -407,14 +419,14 @@ class _ChartPageState extends State<ChartPage> {
                       ],
                     ),
 
-                    /// No Data
+                    // No Data
                     if (total == 0)
                       const Expanded(
                         child:
                         Center(child: Text("No data for this month.")),
                       )
 
-                    /// Data available → Pie + Line + Stats + GPT
+                    // Data available → Pie + Line + Stats + GPT
                     else
                       Expanded(
                         child: SingleChildScrollView(
@@ -440,7 +452,7 @@ class _ChartPageState extends State<ChartPage> {
 
                               const SizedBox(height: 10),
 
-                              /// Curve & Click Popup (Version B)
+                              // Curve & Click Popup (Version B)
                               _buildEmotionLineChart(),
 
                               const SizedBox(height: 10),
@@ -473,7 +485,7 @@ class _ChartPageState extends State<ChartPage> {
         ],
       ),
 
-      /// Bottom Nav
+      // Bottom Nav
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _tabIndex,
         onTap: (i) {
@@ -511,7 +523,7 @@ class _ChartPageState extends State<ChartPage> {
     );
   }
 
-  /// PieChart Section builder
+  // PieChart Section builder
   PieChartSectionData _pieSection(String emotion, double ratio, Color color) {
     if (ratio == 0) return PieChartSectionData(value: 0);
     return PieChartSectionData(
@@ -524,7 +536,7 @@ class _ChartPageState extends State<ChartPage> {
     );
   }
 
-  /// Summary Cards
+  // Summary Cards
   Widget _buildSummaryCards() {
     final totalChats = totalEmotionCounts.values.fold(0, (a, b) => a + b);
     final mostFrequent = totalEmotionCounts.entries
@@ -561,7 +573,7 @@ class _ChartPageState extends State<ChartPage> {
     );
   }
 
-  /// Small List Statistics
+  // Small List Statistics
   Widget _emotionStatList(Map<String, double> ratios) {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12),

@@ -14,30 +14,33 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final _auth = FirebaseAuth.instance;
+  final _auth = FirebaseAuth.instance; // Firebase auth instance
+  // Subscriptions to Firebase listeners (profile + chat history)
   StreamSubscription<DatabaseEvent>? _profileSub;
   StreamSubscription<DatabaseEvent>? _chatHistorySub;
 
-  String? _username;
-  String? _photoBase64;
-  int _tabIndex = 0;
-  List<Map<String, dynamic>> recentChats = [];
+  String? _username; // Loaded from Firebase
+  String? _photoBase64; // Base64 encoded profile picture
+  int _tabIndex = 0; // For bottom navigation bar
+  List<Map<String, dynamic>> recentChats = []; // Stores chat history summary
 
   @override
   void initState() {
     super.initState();
-    _loadProfile();
-    _loadChatHistory();
+    _loadProfile(); // Start listening to user profile changes
+    _loadChatHistory(); // Start listening to chat history updates
   }
 
-  /// 监听用户资料
+  // LOAD & LISTEN TO USER PROFILE
   void _loadProfile() {
     final user = _auth.currentUser;
     if (user == null) return;
 
     final uid = user.uid;
+    // Listen to the user's node in Firebase DB
     _profileSub = FirebaseDatabase.instance.ref('users/$uid').onValue.listen(
           (event) {
+        // Convert snapshot to Map
         final data = (event.snapshot.value as Map?) ?? {};
         setState(() {
           _username = data['username'] as String? ?? 'User';
@@ -47,30 +50,43 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 载入聊天记录（✅ 加入 aiName）
+  // LOAD CHAT HISTORY WITH aiName
   void _loadChatHistory() {
     final user = _auth.currentUser;
     if (user == null) return;
 
     final uid = user.uid;
+
+    // Listen to chat list under chathistory/uid
     _chatHistorySub =
         FirebaseDatabase.instance.ref('chathistory/$uid').onValue.listen(
               (event) {
             final data = (event.snapshot.value as Map?) ?? {};
             List<Map<String, dynamic>> chats = [];
 
+            // Every child = one chat room
             data.forEach((chatId, value) {
               final chat = value as Map;
               final meta = chat['meta'] as Map?;
+
+              // --- Added: skip archived chats (no meta = archived) ---
+              if (meta == null) {
+                return; // Do NOT show archived chats
+              }
+              // ---------------------------------------------------------
+
+              // Store only metadata needed for chat list
               chats.add({
                 'chatId': chatId,
-                'aiName': meta?['aiName'] ?? 'Companion',
-                'lastMessage': meta?['lastMessage'] ?? '',
-                'updatedAt': meta?['updatedAt'] ?? 0,
+                'aiName': meta['aiName'] ?? 'Companion', // default AI name
+                'lastMessage': meta['lastMessage'] ?? '',
+                'updatedAt': meta['updatedAt'] ?? 0, // used for sorting
               });
             });
 
+            // Sort most recent chats to the top
             chats.sort((a, b) => b['updatedAt'].compareTo(a['updatedAt']));
+
             setState(() {
               recentChats = chats;
             });
@@ -78,17 +94,19 @@ class _HomePageState extends State<HomePage> {
         );
   }
 
-  /// 呼吸练习弹窗
+  // BREATHING MODAL
+  // A 1-minute breathing exercise with countdown timer
   void _openBreathingModal() {
     showDialog(
       context: context,
-      barrierDismissible: false,
+      barrierDismissible: false, // User must click Close
       builder: (ctx) {
         int seconds = 60;
         Timer? timer;
 
         return StatefulBuilder(
           builder: (context, setModalState) {
+            // Start 60s countdown timer
             void startTimer() {
               timer = Timer.periodic(const Duration(seconds: 1), (t) {
                 if (seconds == 0) {
@@ -104,6 +122,7 @@ class _HomePageState extends State<HomePage> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(16)),
               title: const Text("1-Minute Breathing"),
+              // Modal content with instructions + timer
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -115,6 +134,7 @@ class _HomePageState extends State<HomePage> {
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 16),
+                  // Timer display after clicking Start
                   if (seconds < 60)
                     Text(
                       seconds > 0
@@ -126,15 +146,17 @@ class _HomePageState extends State<HomePage> {
                 ],
               ),
               actions: [
+                // Start button appears only before timer starts
                 if (seconds == 60)
                   TextButton(
                     onPressed: startTimer,
                     child: const Text("Start"),
                   ),
+                // Close button always visible
                 TextButton(
                   onPressed: () {
-                    timer?.cancel();
-                    Navigator.pop(ctx);
+                    timer?.cancel(); // Stop timer if running
+                    Navigator.pop(ctx); // Close dialog
                   },
                   child: const Text("Close"),
                 ),
@@ -146,24 +168,27 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 新建聊天
+  // CREATE NEW CHAT + NAVIGATE TO CHATBOX PAGE
   Future<void> _createNewChatAndOpen() async {
     final user = _auth.currentUser;
     if (user == null) return;
 
     final uid = user.uid;
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    // Create a new chat node using push()
     final ref = FirebaseDatabase.instance.ref('chathistory/$uid').push();
     final chatId = ref.key;
     if (chatId == null) return;
 
+    // Initial metadata for the new chat
     await ref.child('meta').set({
       'createdAt': now,
       'updatedAt': now,
       'lastMessage': '',
-      'aiName': 'Companion',
+      'aiName': 'Companion', // default AI persona name
     });
 
+    // Navigate to chatbox page
     if (!mounted) return;
     Navigator.push(
       context,
@@ -171,6 +196,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  // BOTTOM NAVIGATION
   void _onBottomTap(int index) {
     if (index == _tabIndex) return;
     setState(() => _tabIndex = index);
@@ -190,13 +216,16 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // AVATAR BUILDER
   Widget _buildAvatar() {
+    // If profile photo exists → decode from Base64
     if (_photoBase64 != null && _photoBase64!.isNotEmpty) {
       return CircleAvatar(
         radius: 26,
         backgroundImage: MemoryImage(base64Decode(_photoBase64!)),
       );
     } else {
+      // Otherwise show initials from username
       final initials =
       _username?.isNotEmpty == true ? _username![0].toUpperCase() : 'U';
       return CircleAvatar(
@@ -211,23 +240,27 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // Format timestamp for display in chat list
   String _formatTime(int timestamp) {
     if (timestamp == 0) return '';
     final dt = DateTime.fromMillisecondsSinceEpoch(timestamp);
     final now = DateTime.now();
+    // If message is from today → show HH:mm
     if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
       return "${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}";
     }
+    // Otherwise show MM/DD
     return "${dt.month}/${dt.day}";
   }
 
   @override
   void dispose() {
-    _profileSub?.cancel();
-    _chatHistorySub?.cancel();
+    _profileSub?.cancel(); // Stop listening to profile changes
+    _chatHistorySub?.cancel(); // Stop listening to chat history
     super.dispose();
   }
 
+  // BUILD UI
   @override
   Widget build(BuildContext context) {
     final name = _username ?? 'User';
@@ -353,12 +386,27 @@ class _HomePageState extends State<HomePage> {
                             style: const TextStyle(
                                 fontSize: 12, color: Colors.grey),
                           ),
-                          onTap: () {
+                          onTap: () async {
+                            final uid = _auth.currentUser!.uid;
+
+                            // --- Added: Check if chat still has meta (not archived) ---
+                            final metaRef = FirebaseDatabase.instance
+                                .ref('chathistory/$uid/${chat['chatId']}/meta');
+
+                            final metaSnap = await metaRef.get();
+
+                            if (!metaSnap.exists) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text("This chat has been archived.")),
+                              );
+                              return; // Do NOT open archived chat
+                            }
+                            // -----------------------------------------------------------
+
                             Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (_) => ChatBoxPage(
-                                    chatId: chat['chatId']),
+                                builder: (_) => ChatBoxPage(chatId: chat['chatId']),
                               ),
                             );
                           },
@@ -391,7 +439,7 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
 
-      // ===== 底部导航栏 =====
+      // Bottom Navigation Bar
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: const Color(0xFFFFF7E9),

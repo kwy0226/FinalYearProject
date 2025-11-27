@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:dio/dio.dart';
+
 import 'firebase_options.dart';
 import 'background_widget.dart';
 
@@ -14,35 +15,42 @@ class RegisterPage extends StatefulWidget {
 }
 
 class _RegisterPageState extends State<RegisterPage> {
+  // Global form key for validation
   final _formKey = GlobalKey<FormState>();
 
+  // Text controllers
   final _usernameCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   final _confirmCtrl = TextEditingController();
 
-  // live validation flags
+  // Validation flags
   bool _emailValid = false;
   bool _pwdValid = false;
   bool _confirmValid = false;
 
-  // show check/cross only after typing
+  // Password visibility toggles
+  bool _passwordObscure = true;
+  bool _confirmObscure = true;
+
+  // Dirty flags
   bool _emailDirty = false;
   bool _pwdDirty = false;
   bool _confirmDirty = false;
 
-  // email existence check
+  // Email existence check
   bool _checkingEmail = false;
   bool _emailExists = false;
   Timer? _emailDebounce;
 
+  // Other UI flags
   bool _agree = false;
   bool _loading = false;
   String? _error;
 
-  int? _month; // 1..12
-  int? _day;   // 1..(28..31)
-  int? _year;  // 1950..2025
+  int? _month;
+  int? _day;
+  int? _year;
 
   @override
   void dispose() {
@@ -54,15 +62,17 @@ class _RegisterPageState extends State<RegisterPage> {
     super.dispose();
   }
 
-  // ---------- helpers ----------
+  // Email regex
   static final RegExp _emailRe = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
 
+  // Password rule: 8–14 characters + must contain letters
   bool _validatePasswordRules(String v) {
     if (v.length < 8 || v.length > 14) return false;
-    if (!RegExp(r'[A-Za-z]').hasMatch(v)) return false; // must contain letters
+    if (!RegExp(r'[A-Za-z]').hasMatch(v)) return false;
     return true;
   }
 
+  // Days in month helper
   int _daysInMonth(int year, int month) {
     if (month == 2) {
       final leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
@@ -74,13 +84,13 @@ class _RegisterPageState extends State<RegisterPage> {
 
   List<int> get _years => List<int>.generate(2025 - 1950 + 1, (i) => 1950 + i);
   List<int> get _months => List<int>.generate(12, (i) => i + 1);
+
   List<int> _daysFor(int? y, int? m) {
     if (y == null || m == null) return const [];
-    final n = _daysInMonth(y, m);
-    return List<int>.generate(n, (i) => i + 1);
+    return List<int>.generate(_daysInMonth(y, m), (i) => i + 1);
   }
 
-  /// REST fallback: check if an email is already registered using Google Identity Toolkit.
+  /// Check if email already exists (REST fallback)
   Future<bool> _emailAlreadyRegistered(String email) async {
     try {
       final apiKey = DefaultFirebaseOptions.currentPlatform.apiKey;
@@ -92,15 +102,13 @@ class _RegisterPageState extends State<RegisterPage> {
         'continueUri': 'https://example.com',
       });
 
-      final registered = resp.data is Map && resp.data['registered'] == true;
-      return registered; // true = already in use
-    } catch (e) {
-      debugPrint('Email check (REST) error: $e');
-      // On error, treat as not registered and rely on server-side validation during submit.
-      return false;
+      return resp.data is Map && resp.data['registered'] == true;
+    } catch (_) {
+      return false; // fallback — allow validation on submit
     }
   }
 
+  // Terms & Policy dialog
   Future<void> _openTermsDialog() async {
     final controller = ScrollController();
     bool reachedBottom = false;
@@ -109,63 +117,97 @@ class _RegisterPageState extends State<RegisterPage> {
       context: context,
       barrierDismissible: false,
       builder: (ctx) {
-        return StatefulBuilder(builder: (ctx, setDState) {
-          controller.addListener(() {
-            final atBottom =
-                controller.offset >= controller.position.maxScrollExtent - 8.0;
-            if (atBottom != reachedBottom) {
-              reachedBottom = atBottom;
-              setDState(() {});
-            }
-          });
+        return StatefulBuilder(
+          builder: (ctx, setD) {
+            if (!controller.hasListeners) {
+              controller.addListener(() {
+                final isAtBottom = controller.offset >=
+                    controller.position.maxScrollExtent - 10;
 
-          return AlertDialog(
-            backgroundColor: const Color(0xFFFFF7E9),
-            title: const Text("Terms & Data Policy"),
-            content: SizedBox(
-              width: 460,
-              height: 260,
-              child: Scrollbar(
-                thumbVisibility: true,
-                controller: controller,
-                child: SingleChildScrollView(
+                if (isAtBottom != reachedBottom) {
+                  reachedBottom = isAtBottom;
+                  setD(() {}); // update Agree button state
+                }
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFFFFF7E9),
+              title: const Text("Terms & Data Policy"),
+              content: SizedBox(
+                width: 460,
+                height: 260,
+                child: Scrollbar(
+                  thumbVisibility: true,
                   controller: controller,
-                  padding: const EdgeInsets.only(right: 8),
-                  child: const Text(
-                    "This app will collect user profile data and chat messages "
-                        "for research purposes. We commit not to use this data for "
-                        "any illegal activities. By continuing, you acknowledge "
-                        "and accept that your data may be analyzed to improve the "
-                        "service quality and research outcomes. Your data will be "
-                        "handled with care and protected with appropriate security "
-                        "measures.\n\n"
-                        "Please read the entire statement. The Agree button will "
-                        "only be enabled once you reach the bottom of this dialog.",
+                  child: SingleChildScrollView(
+                    controller: controller,
+                    child: const Text(
+                      "This application collects certain user information for the purpose of system functionality, "
+                          "research, and continuous improvement of the AI assistant. By creating an account and using "
+                          "this application, you acknowledge and agree to the following terms:\n\n"
+
+                          "1. Data Collected\n"
+                          "- Basic profile information such as username, email address, and date of birth.\n"
+                          "- User interaction data including chat messages, emotional feedback results, and AI response logs.\n"
+                          "- Technical information, such as device type, usage time, and app performance statistics.\n\n"
+
+                          "2. Purpose of Data Usage\n"
+                          "- To enable key features of the system, including personalized responses, emotional analysis, and user history tracking.\n"
+                          "- To support academic research related to emotion recognition, human–AI interaction, and system performance analysis.\n"
+                          "- To improve model accuracy, user experience, and overall system quality.\n\n"
+
+                          "3. Data Protection & Privacy\n"
+                          "- All collected data is stored securely using encrypted and authenticated cloud services.\n"
+                          "- Your personal data will not be sold, shared, or disclosed to unauthorized third parties.\n"
+                          "- Data access is restricted to project developers and academic supervisors for research purposes only.\n"
+                          "- Your data will never be used for illegal activities, harmful profiling, or targeted advertising.\n\n"
+
+                          "4. Research & Analytics\n"
+                          "- Aggregated and anonymized data may be analyzed to identify patterns such as emotion trends, "
+                          "user behavior groups, and system performance metrics.\n"
+                          "- No individual user identity will be revealed in any research output or academic reporting.\n"
+                          "- The system may process historical chat logs to compute monthly emotion summaries, usage statistics, "
+                          "or performance evaluations.\n\n"
+
+                          "5. User Rights\n"
+                          "- You may request deletion of your account and data at any time by contacting the system administrator.\n"
+                          "- You may update your profile information within the app settings.\n"
+                          "- If you choose not to agree with these terms, you may decline and exit registration.\n\n"
+
+                          "6. Agreement\n"
+                          "By scrolling to the bottom and pressing the 'Agree' button, you confirm that you have read, "
+                          "understood, and accepted all the terms stated in this policy. If you disagree with any part of "
+                          "this policy, please select 'Decline'.\n\n"
+
+                          "Thank you for supporting this academic project. Your privacy and security are always our priority.",
+                    ),
                   ),
                 ),
               ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text("Decline"),
-              ),
-              FilledButton(
-                onPressed: reachedBottom
-                    ? () {
-                  setState(() => _agree = true);
-                  Navigator.of(ctx).pop();
-                }
-                    : null,
-                child: const Text("Agree"),
-              ),
-            ],
-          );
-        });
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text("Decline"),
+                ),
+                FilledButton(
+                  onPressed: reachedBottom
+                      ? () {
+                    setState(() => _agree = true);
+                    Navigator.pop(ctx);
+                  }
+                      : null,
+                  child: const Text("Agree"),
+                ),
+              ],
+            );
+          },
+        );
       },
     );
   }
 
+  // Register user + write to Firebase
   Future<void> _handleRegister() async {
     final valid = _formKey.currentState?.validate() ?? false;
     if (!valid) return;
@@ -185,52 +227,44 @@ class _RegisterPageState extends State<RegisterPage> {
     });
 
     try {
-      // 1) Create auth user (server-side will still reject if email was taken).
       final cred = await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: _emailCtrl.text.trim(),
         password: _passwordCtrl.text,
       );
 
-      // 2) Update displayName
       await cred.user?.updateDisplayName(_usernameCtrl.text.trim());
 
-// 3) Write profile to RTDB (add status.disabled = false)
       final uid = cred.user!.uid;
-      final ref = FirebaseDatabase.instance.ref("users/$uid");
-      await ref.set({
+      await FirebaseDatabase.instance.ref("users/$uid").set({
         "username": _usernameCtrl.text.trim(),
         "email": _emailCtrl.text.trim(),
-        "birthday": {"year": _year, "month": _month, "day": _day},
-        "createdAt": DateTime.now().toUtc().toIso8601String(),
-        "status": {
-          "disabled": false,
+        "birthday": {
+          "year": _year,
+          "month": _month,
+          "day": _day,
         },
+        "createdAt": DateTime.now().toIso8601String(),
+        "status": {"disabled": false},
       });
 
-      // 4) Sign out -> back to login
       await FirebaseAuth.instance.signOut();
 
       if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Registration successful. Please log in.")),
       );
+
       Navigator.pop(context);
     } on FirebaseAuthException catch (e) {
-      String msg;
-      switch (e.code) {
-        case "email-already-in-use":
-          msg = "Email is already in use.";
-          break;
-        case "invalid-email":
-          msg = "Invalid email address.";
-          break;
-        case "weak-password":
-          msg = "Password is too weak.";
-          break;
-        default:
-          msg = e.message ?? "Registration failed.";
-      }
-      setState(() => _error = msg);
+      setState(() {
+        _error = switch (e.code) {
+          "email-already-in-use" => "Email is already in use.",
+          "invalid-email" => "Invalid email.",
+          "weak-password" => "Password is too weak.",
+          _ => e.message ?? "Registration failed."
+        };
+      });
     } catch (e) {
       setState(() => _error = e.toString());
     } finally {
@@ -238,6 +272,7 @@ class _RegisterPageState extends State<RegisterPage> {
     }
   }
 
+  // Email suffix: loading / ✓ / X
   Widget? _buildEmailSuffix() {
     if (!_emailDirty) return null;
     if (_checkingEmail) {
@@ -255,6 +290,8 @@ class _RegisterPageState extends State<RegisterPage> {
         color: ok ? Colors.green : Colors.red);
   }
 
+
+  // UI
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -276,372 +313,344 @@ class _RegisterPageState extends State<RegisterPage> {
                   padding:
                   const EdgeInsets.symmetric(horizontal: 26, vertical: 28),
                   child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: IconButton(
-                            icon: const Icon(Icons.arrow_back),
-                            onPressed: () => Navigator.pop(context),
+                    child: Form(
+                      key: _formKey,
+                      child: Column(
+                        children: [
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: IconButton(
+                              icon: const Icon(Icons.arrow_back),
+                              onPressed: () => Navigator.pop(context),
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 4),
 
-                        Form(
-                          key: _formKey,
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              Text(
-                                "Create Account",
-                                textAlign: TextAlign.center,
-                                style: theme.textTheme.headlineSmall?.copyWith(
-                                  fontWeight: FontWeight.w800,
-                                  color: const Color(0xFF5E4631),
-                                ),
-                              ),
-                              const SizedBox(height: 18),
+                          const SizedBox(height: 10),
 
-                              // Username
-                              TextFormField(
-                                controller: _usernameCtrl,
-                                textInputAction: TextInputAction.next,
-                                decoration: const InputDecoration(
-                                  labelText: "Username",
-                                  prefixIcon: Icon(Icons.person_outline),
-                                  border: OutlineInputBorder(),
-                                ),
-                                validator: (v) {
-                                  final value = v?.trim() ?? "";
-                                  if (value.isEmpty) {
-                                    return "Please enter a username";
-                                  }
-                                  if (value.length < 2) {
-                                    return "At least 2 characters";
-                                  }
-                                  return null;
-                                },
-                              ),
-                              const SizedBox(height: 12),
+                          Text(
+                            "Create Account",
+                            style: theme.textTheme.headlineSmall?.copyWith(
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF5E4631),
+                            ),
+                          ),
+                          const SizedBox(height: 18),
 
-                              // Email: format + uniqueness (async with debounce)
-                              TextFormField(
-                                controller: _emailCtrl,
-                                keyboardType: TextInputType.emailAddress,
-                                textInputAction: TextInputAction.next,
-                                onChanged: (v) {
-                                  final value = v.trim();
-                                  setState(() {
-                                    _emailDirty = true;
-                                    _emailValid = _emailRe.hasMatch(value);
-                                    _emailExists = false;
-                                  });
+                          // USERNAME
+                          TextFormField(
+                            controller: _usernameCtrl,
+                            decoration: const InputDecoration(
+                              labelText: "Username",
+                              prefixIcon: Icon(Icons.person_outline),
+                              border: OutlineInputBorder(),
+                            ),
+                            validator: (v) {
+                              if ((v ?? "").trim().isEmpty) {
+                                return "Please enter a username";
+                              }
+                              if ((v ?? "").trim().length < 2) {
+                                return "At least 2 characters";
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 12),
 
-                                  _emailDebounce?.cancel();
-                                  _emailDebounce = Timer(
-                                    const Duration(milliseconds: 500),
-                                        () async {
-                                      if (!_emailValid) return;
-                                      setState(() => _checkingEmail = true);
-                                      final exists =
-                                      await _emailAlreadyRegistered(value);
-                                      if (!mounted) return;
-                                      setState(() {
-                                        _emailExists = exists;
-                                        _checkingEmail = false;
+                          // EMAIL
+                          TextFormField(
+                            controller: _emailCtrl,
+                            keyboardType: TextInputType.emailAddress,
+                            decoration: InputDecoration(
+                              labelText: "Email",
+                              prefixIcon: const Icon(Icons.email_outlined),
+                              border: const OutlineInputBorder(),
+                              suffixIcon: _buildEmailSuffix(),
+                            ),
+                            onChanged: (v) {
+                              final value = v.trim();
+                              setState(() {
+                                _emailDirty = true;
+                                _emailValid = _emailRe.hasMatch(value);
+                                _emailExists = false;
+                              });
+
+                              _emailDebounce?.cancel();
+                              _emailDebounce =
+                                  Timer(const Duration(milliseconds: 500),
+                                          () async {
+                                        if (!_emailValid) return;
+                                        setState(() => _checkingEmail = true);
+
+                                        final exists =
+                                        await _emailAlreadyRegistered(value);
+                                        if (!mounted) return;
+                                        setState(() {
+                                          _emailExists = exists;
+                                          _checkingEmail = false;
+                                        });
                                       });
-                                    },
-                                  );
-                                },
-                                decoration: InputDecoration(
-                                  labelText: "Email",
-                                  prefixIcon:
-                                  const Icon(Icons.email_outlined),
-                                  border: const OutlineInputBorder(),
-                                  suffixIcon: _buildEmailSuffix(),
-                                ),
-                                validator: (v) {
-                                  final value = v?.trim() ?? "";
-                                  if (value.isEmpty) {
-                                    return "Please enter your email";
-                                  }
-                                  if (!_emailRe.hasMatch(value)) {
-                                    return "Invalid email";
-                                  }
-                                  if (_emailExists) {
-                                    return "Email already in use";
-                                  }
-                                  return null;
-                                },
-                              ),
-                              const SizedBox(height: 12),
+                            },
+                            validator: (v) {
+                              final value = v?.trim() ?? "";
+                              if (value.isEmpty) return "Enter email";
+                              if (!_emailRe.hasMatch(value)) {
+                                return "Invalid email";
+                              }
+                              if (_emailExists) {
+                                return "Email already in use";
+                              }
+                              return null;
+                            },
+                          ),
+                          const SizedBox(height: 12),
 
-                              // Birthday: Year / Month / Day
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: DropdownButtonFormField<int>(
-                                      isDense: true,
-                                      value: _year,
-                                      items: _years
-                                          .map((y) => DropdownMenuItem(
-                                        value: y,
-                                        child: Text(y.toString()),
-                                      ))
-                                          .toList(),
-                                      decoration: const InputDecoration(
-                                        labelText: "Year",
-                                        border: OutlineInputBorder(),
-                                        isDense: true,
-                                        contentPadding:
-                                        EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 10,
-                                        ),
-                                      ),
-                                      onChanged: (v) {
-                                        setState(() {
-                                          _year = v;
-                                          if (_day != null &&
-                                              _year != null &&
-                                              _month != null) {
-                                            final max = _daysInMonth(
-                                                _year!, _month!);
-                                            if (_day! > max) _day = null;
-                                          }
-                                        });
-                                      },
-                                      validator: (v) =>
-                                      v == null ? "Select year" : null,
-                                    ),
+                          // BIRTHDAY ROW
+                          Row(
+                            children: [
+                              Expanded(
+                                child: DropdownButtonFormField<int>(
+                                  isDense: true,
+                                  value: _year,
+                                  decoration: const InputDecoration(
+                                    labelText: "Year",
+                                    border: OutlineInputBorder(),
                                   ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: DropdownButtonFormField<int>(
-                                      isDense: true,
-                                      value: _month,
-                                      items: _months
-                                          .map((m) => DropdownMenuItem(
-                                        value: m,
-                                        child: Text(m.toString()),
-                                      ))
-                                          .toList(),
-                                      decoration: const InputDecoration(
-                                        labelText: "Month",
-                                        border: OutlineInputBorder(),
-                                        isDense: true,
-                                        contentPadding:
-                                        EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 10,
-                                        ),
-                                      ),
-                                      onChanged: (v) {
-                                        setState(() {
-                                          _month = v;
-                                          if (_day != null &&
-                                              _year != null &&
-                                              _month != null) {
-                                            final max = _daysInMonth(
-                                                _year!, _month!);
-                                            if (_day! > max) _day = null;
-                                          }
-                                        });
-                                      },
-                                      validator: (v) =>
-                                      v == null ? "Select month" : null,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: DropdownButtonFormField<int>(
-                                      isDense: true,
-                                      value: _day,
-                                      items: _daysFor(_year, _month)
-                                          .map((d) => DropdownMenuItem(
-                                        value: d,
-                                        child: Text(d.toString()),
-                                      ))
-                                          .toList(),
-                                      decoration: const InputDecoration(
-                                        labelText: "Day",
-                                        border: OutlineInputBorder(),
-                                        isDense: true,
-                                        contentPadding:
-                                        EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 10,
-                                        ),
-                                      ),
-                                      onChanged: (v) =>
-                                          setState(() => _day = v),
-                                      validator: (v) =>
-                                      v == null ? "Select day" : null,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-
-                              // Password (+ eye) with live check
-                              StatefulBuilder(
-                                builder: (ctx, setLocal) {
-                                  bool obscure = true;
-                                  return TextFormField(
-                                    controller: _passwordCtrl,
-                                    obscureText: obscure,
-                                    onChanged: (v) => setState(() {
-                                      _pwdDirty = true;
-                                      _pwdValid = _validatePasswordRules(v);
-                                      _confirmValid =
-                                          _confirmCtrl.text == v;
-                                    }),
-                                    textInputAction: TextInputAction.next,
-                                    decoration: InputDecoration(
-                                      labelText:
-                                      "Password (8–14, must contain letters)",
-                                      prefixIcon: const Icon(Icons.lock_outline),
-                                      border: const OutlineInputBorder(),
-                                      suffixIcon: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          if (_pwdDirty)
-                                            Icon(
-                                              _pwdValid
-                                                  ? Icons.check_circle
-                                                  : Icons.cancel,
-                                              color: _pwdValid
-                                                  ? Colors.green
-                                                  : Colors.red,
-                                            ),
-                                          IconButton(
-                                            tooltip: "Toggle visibility",
-                                            onPressed: () {
-                                              obscure = !obscure;
-                                              setLocal(() {});
-                                            },
-                                            icon: Icon(
-                                              obscure
-                                                  ? Icons.visibility
-                                                  : Icons.visibility_off,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                    validator: (v) {
-                                      final value = v ?? "";
-                                      if (value.isEmpty) {
-                                        return "Please enter your password";
+                                  items: _years
+                                      .map((y) => DropdownMenuItem(
+                                    value: y,
+                                    child: Text("$y"),
+                                  ))
+                                      .toList(),
+                                  onChanged: (v) {
+                                    setState(() {
+                                      _year = v;
+                                      if (_day != null &&
+                                          _month != null &&
+                                          _year != null) {
+                                        final max = _daysInMonth(
+                                            _year!, _month!);
+                                        if (_day! > max) _day = null;
                                       }
-                                      if (!_validatePasswordRules(value)) {
-                                        return "8–14 characters and must contain letters";
-                                      }
-                                      return null;
-                                    },
-                                  );
-                                },
-                              ),
-                              const SizedBox(height: 12),
-
-                              // Confirm password
-                              TextFormField(
-                                controller: _confirmCtrl,
-                                obscureText: true,
-                                onChanged: (v) => setState(() {
-                                  _confirmDirty = true;
-                                  _confirmValid =
-                                      v == _passwordCtrl.text;
-                                }),
-                                textInputAction: TextInputAction.done,
-                                decoration: InputDecoration(
-                                  labelText: "Confirm Password",
-                                  prefixIcon:
-                                  const Icon(Icons.lock_reset),
-                                  border: const OutlineInputBorder(),
-                                  suffixIcon: _confirmDirty
-                                      ? Icon(
-                                    _confirmValid
-                                        ? Icons.check_circle
-                                        : Icons.cancel,
-                                    color: _confirmValid
-                                        ? Colors.green
-                                        : Colors.red,
-                                  )
-                                      : null,
-                                ),
-                                validator: (v) {
-                                  if ((v ?? "").isEmpty) {
-                                    return "Please confirm your password";
-                                  }
-                                  if (v != _passwordCtrl.text) {
-                                    return "Passwords do not match";
-                                  }
-                                  return null;
-                                },
-                              ),
-                              const SizedBox(height: 12),
-
-                              // Terms
-                              InkWell(
-                                onTap: _openTermsDialog,
-                                child: Row(
-                                  crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                                  children: [
-                                    Checkbox(
-                                      value: _agree,
-                                      onChanged: (_) => _openTermsDialog(),
-                                    ),
-                                    const Expanded(
-                                      child: Padding(
-                                        padding: EdgeInsets.only(top: 12),
-                                        child: Text(
-                                          "I have read and agree to the Terms & Data Policy.",
-                                        ),
-                                      ),
-                                    ),
-                                  ],
+                                    });
+                                  },
+                                  validator: (v) =>
+                                  v == null ? "Select year" : null,
                                 ),
                               ),
-
-                              if (_error != null) ...[
-                                const SizedBox(height: 6),
-                                Text(
-                                  _error!,
-                                  style:
-                                  const TextStyle(color: Colors.red),
-                                ),
-                              ],
-
-                              const SizedBox(height: 10),
-                              SizedBox(
-                                height: 48,
-                                child: FilledButton(
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor:
-                                    const Color(0xFFB08968),
-                                    foregroundColor: Colors.white,
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: DropdownButtonFormField<int>(
+                                  isDense: true,
+                                  value: _month,
+                                  decoration: const InputDecoration(
+                                    labelText: "Month",
+                                    border: OutlineInputBorder(),
                                   ),
-                                  onPressed:
-                                  _loading ? null : _handleRegister,
-                                  child: _loading
-                                      ? const SizedBox(
-                                    width: 22,
-                                    height: 22,
-                                    child:
-                                    CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                      : const Text("Register"),
+                                  items: _months
+                                      .map((m) => DropdownMenuItem(
+                                    value: m,
+                                    child: Text("$m"),
+                                  ))
+                                      .toList(),
+                                  onChanged: (v) {
+                                    setState(() {
+                                      _month = v;
+                                      if (_day != null &&
+                                          _month != null &&
+                                          _year != null) {
+                                        final max = _daysInMonth(
+                                            _year!, _month!);
+                                        if (_day! > max) _day = null;
+                                      }
+                                    });
+                                  },
+                                  validator: (v) =>
+                                  v == null ? "Select month" : null,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: DropdownButtonFormField<int>(
+                                  isDense: true,
+                                  value: _day,
+                                  decoration: const InputDecoration(
+                                    labelText: "Day",
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  items: _daysFor(_year, _month)
+                                      .map((d) => DropdownMenuItem(
+                                    value: d,
+                                    child: Text("$d"),
+                                  ))
+                                      .toList(),
+                                  onChanged: (v) => setState(() => _day = v),
+                                  validator: (v) =>
+                                  v == null ? "Select day" : null,
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                      ],
+
+                          const SizedBox(height: 12),
+
+                          // PASSWORD
+                          TextFormField(
+                            controller: _passwordCtrl,
+                            obscureText: _passwordObscure,
+                            onChanged: (v) {
+                              setState(() {
+                                _pwdDirty = true;
+                                _pwdValid = _validatePasswordRules(v);
+                                _confirmValid = v == _confirmCtrl.text;
+                              });
+                            },
+                            decoration: InputDecoration(
+                              labelText: "Password (8–14, must contain letters)",
+                              prefixIcon: const Icon(Icons.lock_outline),
+                              border: const OutlineInputBorder(),
+                              suffixIcon: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (_pwdDirty)
+                                    Icon(
+                                      _pwdValid
+                                          ? Icons.check_circle
+                                          : Icons.cancel,
+                                      color: _pwdValid
+                                          ? Colors.green
+                                          : Colors.red,
+                                    ),
+                                  IconButton(
+                                    onPressed: () {
+                                      setState(() {
+                                        _passwordObscure = !_passwordObscure;
+                                      });
+                                    },
+                                    icon: Icon(_passwordObscure
+                                        ? Icons.visibility
+                                        : Icons.visibility_off),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            validator: (v) {
+                              if ((v ?? "").isEmpty) {
+                                return "Please enter your password";
+                              }
+                              if (!_validatePasswordRules(v!)) {
+                                return "8–14 chars, must contain letters";
+                              }
+                              return null;
+                            },
+                          ),
+
+                          const SizedBox(height: 12),
+
+                          // CONFIRM PASSWORD
+                          TextFormField(
+                            controller: _confirmCtrl,
+                            obscureText: _confirmObscure,
+                            onChanged: (v) {
+                              setState(() {
+                                _confirmDirty = true;
+                                _confirmValid = v == _passwordCtrl.text;
+                              });
+                            },
+                            decoration: InputDecoration(
+                              labelText: "Confirm Password",
+                              prefixIcon: const Icon(Icons.lock_reset),
+                              border: const OutlineInputBorder(),
+                              suffixIcon: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (_confirmDirty)
+                                    Icon(
+                                      _confirmValid
+                                          ? Icons.check_circle
+                                          : Icons.cancel,
+                                      color: _confirmValid
+                                          ? Colors.green
+                                          : Colors.red,
+                                    ),
+                                  IconButton(
+                                    onPressed: () {
+                                      setState(() {
+                                        _confirmObscure = !_confirmObscure;
+                                      });
+                                    },
+                                    icon: Icon(_confirmObscure
+                                        ? Icons.visibility
+                                        : Icons.visibility_off),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            validator: (v) {
+                              if ((v ?? "").isEmpty) {
+                                return "Please confirm your password";
+                              }
+                              if (v != _passwordCtrl.text) {
+                                return "Passwords do not match";
+                              }
+                              return null;
+                            },
+                          ),
+
+                          const SizedBox(height: 12),
+
+                          // TERMS CHECKBOX
+                          InkWell(
+                            onTap: _openTermsDialog,
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Checkbox(
+                                  value: _agree,
+                                  onChanged: (_) => _openTermsDialog(),
+                                ),
+                                const Expanded(
+                                  child: Padding(
+                                    padding: EdgeInsets.only(top: 12),
+                                    child: Text(
+                                      "I have read and agree to the Terms & Data Policy.",
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          if (_error != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text(
+                                _error!,
+                                style: const TextStyle(color: Colors.red),
+                              ),
+                            ),
+
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            height: 48,
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFB08968),
+                                foregroundColor: Colors.white,
+                              ),
+                              onPressed: _loading ? null : _handleRegister,
+                              child: _loading
+                                  ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                                  : const Text("Register"),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),

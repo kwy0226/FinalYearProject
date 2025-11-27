@@ -1,8 +1,3 @@
-// lib/adminhome.dart
-// ==========================
-// Admin Home 页面（移除情绪和消息比例模块）
-// ==========================
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -24,13 +19,17 @@ class _AdminHomePageState extends State<AdminHomePage> {
   final db = FirebaseDatabase.instance.ref();
   bool _loadingStats = true;
 
-  int totalUsers = 0;
-  int activeUsersLast30d = 0;
-  int totalMessages = 0;
-  int totalChats = 0;
-  int totalDurationMin = 0;
-  double avgDurationMin = 0;
+  // Top-level KPIs shown on admin home
+  int totalUsers = 0; // number of non-admin users
+  int activeUsersLast30d = 0; // distinct non-admin users active in last 30 days
+  int totalMessages = 0; // total messages from non-admin users (in chathistory)
+  int totalChats = 0; // NOTE: we count "sessions" as chats (see session logic)
+  int totalDurationMin = 0; // sum of session durations in minutes
+  double avgDurationMin = 0; // average minutes per session
   List<_TopUser> topUsers = [];
+
+  // Session cutoff constant: if gap > SESSION_TIMEOUT_MS we treat as new session
+  static const int SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
   @override
   void initState() {
@@ -45,92 +44,183 @@ class _AdminHomePageState extends State<AdminHomePage> {
       final last30dStartMs =
           now.millisecondsSinceEpoch - const Duration(days: 30).inMilliseconds;
 
-      final usersSnap = await db.child('users').get();
-      totalUsers = usersSnap.exists ? usersSnap.children.length : 0;
+      // Read admin UIDs so we can exclude them from counts and lists.
+      final adminSnap = await db.child('admin').get();
+      final Set<String> adminUids = {};
+      if (adminSnap.exists) {
+        for (final a in adminSnap.children) {
+          if (a.key != null) adminUids.add(a.key!);
+        }
+      }
 
+      // Load users node and compute totalUsers (excluding admins)
+      final usersSnap = await db.child('users').get();
+      totalUsers = 0;
+      if (usersSnap.exists) {
+        for (final u in usersSnap.children) {
+          final uid = u.key ?? '';
+          if (uid.isEmpty) continue;
+          // skip admin uids
+          if (adminUids.contains(uid)) continue;
+          totalUsers++;
+        }
+      }
+
+      // Reset aggregates
       totalMessages = 0;
-      totalChats = 0;
+      totalChats = 0; // will be session count
       totalDurationMin = 0;
       avgDurationMin = 0;
       topUsers.clear();
 
+      // Helper maps for top users and active marks
       final Map<String, int> perUserCount30d = {};
       final Map<String, bool> activeMark30d = {};
 
+      // Iterate chathistory and aggregate per non-admin user
       final allChats = await db.child('chathistory').get();
       if (allChats.exists) {
         for (final userNode in allChats.children) {
           final uid = userNode.key ?? '';
-          int userCount30d = 0;
+          if (uid.isEmpty) continue;
+          // Skip admin accounts entirely to avoid counting them in system overview
+          if (adminUids.contains(uid)) continue;
+
+          int userCount30d = 0; // messages in last 30d
           bool userActive30d = false;
 
+          // Each child under chathistory/<uid> is a chat (chatId / conversationId).
+          // We'll compute session-level durations across messages in each chat node.
           for (final chatNode in userNode.children) {
             final messages = chatNode.child('messages');
             if (!messages.exists) continue;
-            int? first, last;
+
+            // Collect timestamps for this chatNode
+            final List<int> timestamps = [];
             for (final m in messages.children) {
               final createdAt =
                   int.tryParse((m.child('createdAt').value ?? '0').toString()) ??
                       0;
               if (createdAt > 0) {
-                first =
-                (first == null) ? createdAt : math.min(first!, createdAt);
-                last = (last == null) ? createdAt : math.max(last!, createdAt);
+                timestamps.add(createdAt);
               }
+              // Count message globally
               totalMessages++;
+
+              // Count messages in last 30d for top-users / active users detection
               if (createdAt >= last30dStartMs) {
                 userActive30d = true;
                 userCount30d++;
               }
             }
-            totalChats++;
-            if (first != null && last != null && last >= first) {
-              totalDurationMin += ((last - first) / 60000).round();
+
+            if (timestamps.isEmpty) continue;
+
+            // Sort timestamps ascending (just in case)
+            timestamps.sort();
+
+            // Convert message timestamps into sessions:
+            // - start a session at first timestamp
+            // - continue until gap > SESSION_TIMEOUT_MS -> then close session at previous timestamp
+            // - sessionDuration = last_ts - session_start_ts
+            int sessionStart = timestamps.first;
+            int prevTs = timestamps.first;
+            for (int i = 1; i < timestamps.length; i++) {
+              final ts = timestamps[i];
+              if (ts - prevTs <= SESSION_TIMEOUT_MS) {
+                // same session
+                prevTs = ts;
+                continue;
+              } else {
+                // session ended at prevTs
+                final durationMs = prevTs - sessionStart;
+                if (durationMs > 0) {
+                  totalDurationMin += (durationMs / 60000).round();
+                }
+                totalChats++; // count this session
+                // start new session
+                sessionStart = ts;
+                prevTs = ts;
+              }
             }
-          }
+            // finalize last session for this chatNode
+            final lastSessionDurationMs = prevTs - sessionStart;
+            if (lastSessionDurationMs > 0) {
+              totalDurationMin += (lastSessionDurationMs / 60000).round();
+            }
+            totalChats++;
+          } // end for chatNode
+
           if (userCount30d > 0) perUserCount30d[uid] = userCount30d;
           if (userActive30d) activeMark30d[uid] = true;
-        }
-      }
+        } // end for userNode
+      } // end if allChats.exists
 
       activeUsersLast30d = activeMark30d.length;
+      // average minutes per session; avoid divide-by-zero
       avgDurationMin = totalChats == 0 ? 0 : totalDurationMin / totalChats;
 
+      // Build topUsers from perUserCount30d (messages in last 30d)
       final sorted = perUserCount30d.entries.toList()
         ..sort((a, b) => b.value.compareTo(a.value));
       for (final e in sorted.take(5)) {
         final userSnap = await db.child('users/${e.key}').get();
         final name = (userSnap.child('username').value ?? '').toString();
         final mail = (userSnap.child('email').value ?? '').toString();
-        topUsers.add(
-            _TopUser(uid: e.key, name: name, email: mail, count: e.value));
+        topUsers.add(_TopUser(uid: e.key, name: name, email: mail, count: e.value));
       }
     } finally {
       if (mounted) setState(() => _loadingStats = false);
     }
   }
 
+  // Show per-user dialog with messages, session (chat) count, and session-based duration.
+  // Uses same session logic as global aggregation above (10-minute inactivity cutoff).
   Future<void> _showUserStatsDialog(_TopUser user) async {
-    int msgCount = 0, chatCount = 0, durationMin = 0;
+    int msgCount = 0;
+    int sessionCount = 0;
+    int durationMin = 0;
+
     final snap = await db.child('chathistory/${user.uid}').get();
     if (snap.exists) {
       for (final chat in snap.children) {
         final msgs = chat.child('messages');
         if (!msgs.exists) continue;
-        int? first, last;
+
+        // collect timestamps for this chat
+        final List<int> timestamps = [];
         for (final m in msgs.children) {
           msgCount++;
           final created =
               int.tryParse((m.child('createdAt').value ?? '0').toString()) ?? 0;
-          if (created > 0) {
-            first = (first == null) ? created : math.min(first!, created);
-            last = (last == null) ? created : math.max(last!, created);
+          if (created > 0) timestamps.add(created);
+        }
+
+        if (timestamps.isEmpty) continue;
+        timestamps.sort();
+
+        // sessionize timestamps
+        int sessionStart = timestamps.first;
+        int prevTs = timestamps.first;
+        for (int i = 1; i < timestamps.length; i++) {
+          final ts = timestamps[i];
+          if (ts - prevTs <= SESSION_TIMEOUT_MS) {
+            prevTs = ts;
+            continue;
+          } else {
+            // close previous session
+            final durMs = prevTs - sessionStart;
+            if (durMs > 0) durationMin += (durMs / 60000).round();
+            sessionCount++;
+            // start new session
+            sessionStart = ts;
+            prevTs = ts;
           }
         }
-        chatCount++;
-        if (first != null && last != null && last >= first) {
-          durationMin += ((last - first) / 60000).round();
-        }
+        // finalize last session in this chat
+        final lastDurMs = prevTs - sessionStart;
+        if (lastDurMs > 0) durationMin += (lastDurMs / 60000).round();
+        sessionCount++;
       }
     }
 
@@ -144,14 +234,12 @@ class _AdminHomePageState extends State<AdminHomePage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Messages: $msgCount'),
-            Text('Chats: $chatCount'),
+            Text('Chats: $sessionCount'),
             Text('Duration: ${_fmtMin(durationMin)}'),
           ],
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close')),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
         ],
       ),
     );
@@ -218,8 +306,7 @@ class _AdminHomePageState extends State<AdminHomePage> {
 
         return AlertDialog(
           backgroundColor: const Color(0xFFFFF7E9),
-          shape:
-          RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: const Text('Add Admin'),
           content: Form(
             key: formKey,
@@ -238,21 +325,15 @@ class _AdminHomePageState extends State<AdminHomePage> {
               if (error != null)
                 Padding(
                     padding: const EdgeInsets.only(top: 8),
-                    child:
-                    Text(error!, style: const TextStyle(color: Colors.red))),
+                    child: Text(error!, style: const TextStyle(color: Colors.red))),
             ]),
           ),
           actions: [
-            TextButton(
-                onPressed: working ? null : () => Navigator.pop(context),
-                child: const Text('Cancel')),
+            TextButton(onPressed: working ? null : () => Navigator.pop(context), child: const Text('Cancel')),
             FilledButton(
               onPressed: working ? null : submit,
               child: working
-                  ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                   : const Text('Add'),
             ),
           ],
@@ -276,29 +357,17 @@ class _AdminHomePageState extends State<AdminHomePage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('Welcome, Admin',
-                      style: Theme.of(context)
-                          .textTheme
-                          .headlineMedium
-                          ?.copyWith(
+                      style: Theme.of(context).textTheme.headlineMedium?.copyWith(
                           fontWeight: FontWeight.w800, color: primary)),
                   const SizedBox(height: 6),
                   Text('Manage users and monitor activity',
-                      style: Theme.of(context)
-                          .textTheme
-                          .bodyLarge
-                          ?.copyWith(color: primary)),
+                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: primary)),
                   const SizedBox(height: 14),
                   const Divider(thickness: 1, color: Color(0x22000000)),
                   Row(children: [
-                    _bigAction(
-                        icon: Icons.group,
-                        label: 'Manage Users',
-                        onTap: _openManageUsers),
+                    _bigAction(icon: Icons.group, label: 'Manage Users', onTap: _openManageUsers),
                     const SizedBox(width: 12),
-                    _bigAction(
-                        icon: Icons.person_add_alt_1,
-                        label: 'Add Admin',
-                        onTap: _openAddAdminDialog),
+                    _bigAction(icon: Icons.person_add_alt_1, label: 'Add Admin', onTap: _openAddAdminDialog),
                   ]),
                   const SizedBox(height: 16),
                   _statsCard(
@@ -306,8 +375,7 @@ class _AdminHomePageState extends State<AdminHomePage> {
                     subtitle: 'System overview (last 30 days)',
                     child: Padding(
                       padding: const EdgeInsets.only(top: 12, bottom: 8),
-                      child:
-                      Wrap(spacing: 16, runSpacing: 12, children: [
+                      child: Wrap(spacing: 16, runSpacing: 12, children: [
                         _kpiBlock('Users', '$totalUsers'),
                         _kpiBlock('Active (30d)', '$activeUsersLast30d'),
                         _kpiBlock('Messages', '$totalMessages'),
@@ -317,8 +385,7 @@ class _AdminHomePageState extends State<AdminHomePage> {
                   ),
                   _statsCard(
                     title: 'Chat Duration',
-                    subtitle:
-                    'Total ${_fmtMin(totalDurationMin)} · Avg ${avgDurationMin.toStringAsFixed(1)}m/chat',
+                    subtitle: 'Total ${_fmtMin(totalDurationMin)} · Avg ${avgDurationMin.toStringAsFixed(1)}m/chat',
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
@@ -333,32 +400,23 @@ class _AdminHomePageState extends State<AdminHomePage> {
                     child: Column(children: [
                       for (final u in topUsers)
                         ListTile(
-                          title: Text(u.name.isEmpty ? '(No name)' : u.name,
-                              style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                  color: Color(0xFF5E4631))),
+                          title: Text(u.name.isEmpty ? '(No name)' : u.name, style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF5E4631))),
                           subtitle: Text(u.email.isEmpty ? u.uid : u.email),
                           trailing: Text('${u.count} msgs'),
                           onTap: () => _showUserStatsDialog(u),
                         ),
                       if (topUsers.isEmpty)
-                        const Padding(
-                            padding: EdgeInsets.all(8),
-                            child: Text('— No data —',
-                                style:
-                                TextStyle(color: Color(0xFF5E4631)))),
+                        const Padding(padding: EdgeInsets.all(8), child: Text('— No data —', style: TextStyle(color: Color(0xFF5E4631)))),
                     ]),
                   ),
                   const SizedBox(height: 16),
                   Center(
                     child: ElevatedButton.icon(
-                      onPressed: () =>
-                          Navigator.pushNamed(context, '/emotionoverview'),
+                      onPressed: () => Navigator.pushNamed(context, '/emotionoverview'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFB08968),
                         foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                       ),
                       icon: const Icon(Icons.pie_chart_rounded),
                       label: const Text('View Emotion Insights'),
@@ -370,26 +428,20 @@ class _AdminHomePageState extends State<AdminHomePage> {
                     child: TextButton.icon(
                       onPressed: () async {
                         await FirebaseAuth.instance.signOut();
-                        if (mounted)
-                          Navigator.pushNamedAndRemoveUntil(
-                              context, '/login', (_) => false);
+                        if (mounted) Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
                       },
                       icon: const Icon(Icons.logout_rounded),
                       label: const Text('Logout'),
                       style: TextButton.styleFrom(
                           foregroundColor: const Color(0xFF8B6B4A),
-                          textStyle: const TextStyle(
-                              fontWeight: FontWeight.w700)),
+                          textStyle: const TextStyle(fontWeight: FontWeight.w700)),
                     ),
                   ),
                 ],
               ),
             ),
           ),
-          if (_loadingStats)
-            const Align(
-                alignment: Alignment.topCenter,
-                child: LinearProgressIndicator(minHeight: 2)),
+          if (_loadingStats) const Align(alignment: Alignment.topCenter, child: LinearProgressIndicator(minHeight: 2)),
         ],
       ),
     );
@@ -400,53 +452,30 @@ class _AdminHomePageState extends State<AdminHomePage> {
     return h <= 0 ? '${m}m' : '${h}h ${m}m';
   }
 
-  Widget _bigAction(
-      {required IconData icon,
-        required String label,
-        required VoidCallback onTap}) {
+  Widget _bigAction({required IconData icon, required String label, required VoidCallback onTap}) {
     return Expanded(
       child: InkWell(
         onTap: onTap,
         child: Container(
           height: 120,
-          decoration: BoxDecoration(
-              color: const Color(0xFFFFF7E9),
-              borderRadius: BorderRadius.circular(18),
-              boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8)]),
-          child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, size: 36, color: const Color(0xFF5E4631)),
-                const SizedBox(height: 12),
-                Text(label,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFF5E4631))),
-              ]),
+          decoration: BoxDecoration(color: const Color(0xFFFFF7E9), borderRadius: BorderRadius.circular(18), boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8)]),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, size: 36, color: const Color(0xFF5E4631)),
+            const SizedBox(height: 12),
+            Text(label, style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF5E4631))),
+          ]),
         ),
       ),
     );
   }
 
-  Widget _statsCard(
-      {required String title,
-        required String subtitle,
-        required Widget child}) {
+  Widget _statsCard({required String title, required String subtitle, required Widget child}) {
     return Container(
       margin: const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF7E9),
-        borderRadius: BorderRadius.circular(18),
-        boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 6)],
-      ),
-      child:
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title,
-            style: const TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF5E4631))),
+      decoration: BoxDecoration(color: const Color(0xFFFFF7E9), borderRadius: BorderRadius.circular(18), boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 6)]),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF5E4631))),
         const SizedBox(height: 4),
         Text(subtitle, style: const TextStyle(color: Color(0xFF5E4631))),
         const SizedBox(height: 8),
@@ -457,18 +486,10 @@ class _AdminHomePageState extends State<AdminHomePage> {
 
   static Widget _kpiBlock(String title, String value) {
     return Container(
-      padding:
-      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-          color: const Color(0xFFEFE3D3),
-          borderRadius: BorderRadius.circular(14)),
-      child:
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(value,
-            style: const TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF5E4631))),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(color: const Color(0xFFEFE3D3), borderRadius: BorderRadius.circular(14)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFF5E4631))),
         Text(title, style: const TextStyle(color: Color(0xFF5E4631))),
       ]),
     );
@@ -478,14 +499,15 @@ class _AdminHomePageState extends State<AdminHomePage> {
 class _TopUser {
   final String uid, name, email;
   final int count;
-  _TopUser(
-      {required this.uid,
-        required this.name,
-        required this.email,
-        required this.count});
+  _TopUser({required this.uid, required this.name, required this.email, required this.count});
 }
 
-// ✅ 改进后的 Manage Users sheet
+// ----------------------
+// Manage Users sheet
+// ----------------------
+// Improvements:
+//  - Skip admin accounts when listing users
+//  - Search matches username, email or uid
 class _ManageUsersSheet extends StatefulWidget {
   const _ManageUsersSheet();
   @override
@@ -505,12 +527,29 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
     _searchCtrl.addListener(_applyFilter);
   }
 
+  // Load user rows from `/users`, but skip UIDs listed under `/admin`.
+  // This prevents admin accounts from appearing in Manage Users.
   Future<void> _load() async {
+    loading = true;
+    setState(() {});
+    // read admin set
+    final adminSnap = await db.child('admin').get();
+    final Set<String> adminUids = {};
+    if (adminSnap.exists) {
+      for (final a in adminSnap.children) {
+        if (a.key != null) adminUids.add(a.key!);
+      }
+    }
+
     final usersSnap = await db.child('users').get();
     rows.clear();
     if (usersSnap.exists) {
       for (final u in usersSnap.children) {
         final uid = u.key ?? '';
+        if (uid.isEmpty) continue;
+        // Skip admin users
+        if (adminUids.contains(uid)) continue;
+
         rows.add(_UserRow(
           uid: uid,
           username: (u.child('username').value ?? '').toString(),
@@ -518,14 +557,14 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
           gender: (u.child('gender').value ?? '').toString(),
           birthday: _parseBirthday(u.child('birthday').value),
           photoBase64: (u.child('photoBase64').value ?? '').toString(),
-          disabled: (u.child('status').child('disabled').value ?? false)
-              .toString() ==
-              'true',
+          disabled: (u.child('status').child('disabled').value ?? false).toString() == 'true',
         ));
       }
     }
+    // initially show all rows
     filtered = List.from(rows);
-    setState(() => loading = false);
+    loading = false;
+    setState(() {});
   }
 
   String _parseBirthday(dynamic value) {
@@ -537,26 +576,20 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
       }
       if (value is String) {
         final cleaned = value.replaceAll(RegExp(r'[{}]'), '');
-        final parts = {
-          for (var s in cleaned.split(',')) s.split(':')[0].trim(): s.split(':')[1].trim()
-        };
+        final parts = {for (var s in cleaned.split(',')) s.split(':')[0].trim(): s.split(':')[1].trim()};
         return "${parts['day']}/${parts['month']}/${parts['year']}";
       }
     } catch (_) {}
     return value.toString();
   }
 
+  // Apply text filter to rows. Matches username, email or uid (case-insensitive).
   void _applyFilter() {
     final q = _searchCtrl.text.trim().toLowerCase();
     setState(() {
       filtered = q.isEmpty
           ? List.from(rows)
-          : rows
-          .where((e) =>
-      e.username.toLowerCase().contains(q) ||
-          e.email.toLowerCase().contains(q) ||
-          e.uid.toLowerCase().contains(q))
-          .toList();
+          : rows.where((e) => e.email.toLowerCase().contains(q)).toList();
     });
   }
 
@@ -567,59 +600,32 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
         return AlertDialog(
           backgroundColor: const Color(0xFFFFF7E9),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Row(
-            children: [
-              CircleAvatar(
-                radius: 26,
-                backgroundImage: user.photoBase64.isNotEmpty
-                    ? MemoryImage(base64Decode(user.photoBase64))
-                    : null,
-                child: user.photoBase64.isEmpty
-                    ? const Icon(Icons.person, color: Color(0xFF5E4631))
-                    : null,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  user.username,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                    color: Color(0xFF5E4631),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text("Gender: ${user.gender}", style: const TextStyle(color: Color(0xFF5E4631))),
-              Text("Birthday: ${user.birthday}", style: const TextStyle(color: Color(0xFF5E4631))),
-              const SizedBox(height: 10),
-              Text(
-                "Status: ${user.disabled ? '❌ Disabled' : '✅ Active'}",
-                style: TextStyle(
-                  color: user.disabled ? Colors.red : Colors.green[700],
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
-          ),
+          title: Row(children: [
+            CircleAvatar(
+              radius: 26,
+              backgroundImage: user.photoBase64.isNotEmpty ? MemoryImage(base64Decode(user.photoBase64)) : null,
+              child: user.photoBase64.isEmpty ? const Icon(Icons.person, color: Color(0xFF5E4631)) : null,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(user.username, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Color(0xFF5E4631))),
+            ),
+          ]),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text("Gender: ${user.gender}", style: const TextStyle(color: Color(0xFF5E4631))),
+            Text("Birthday: ${user.birthday}", style: const TextStyle(color: Color(0xFF5E4631))),
+            const SizedBox(height: 10),
+            Text("Status: ${user.disabled ? '❌ Disabled' : '✅ Active'}", style: TextStyle(color: user.disabled ? Colors.red : Colors.green[700], fontWeight: FontWeight.bold)),
+          ]),
           actions: [
             TextButton(
               onPressed: () async {
                 final newState = !user.disabled;
                 await db.child("users/${user.uid}/status/disabled").set(newState);
                 setD(() => user.disabled = newState);
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(newState ? "User disabled" : "User enabled"),
-                  backgroundColor: const Color(0xFFB08968),
-                ));
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(newState ? "User disabled" : "User enabled"), backgroundColor: const Color(0xFFB08968)));
               },
-              child: Text(user.disabled ? "Enable" : "Disable",
-                  style: const TextStyle(color: Color(0xFF5E4631))),
+              child: Text(user.disabled ? "Enable" : "Disable", style: const TextStyle(color: Color(0xFF5E4631))),
             ),
             TextButton(
               onPressed: () async {
@@ -631,11 +637,7 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
                     content: Text("Delete ${user.username}? This cannot be undone."),
                     actions: [
                       TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-                        onPressed: () => Navigator.pop(context, true),
-                        child: const Text("Delete"),
-                      ),
+                      ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red), onPressed: () => Navigator.pop(context, true), child: const Text("Delete")),
                     ],
                   ),
                 );
@@ -646,18 +648,12 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
                     rows.removeWhere((e) => e.uid == user.uid);
                     filtered.removeWhere((e) => e.uid == user.uid);
                   });
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text("User deleted"),
-                    backgroundColor: Colors.redAccent,
-                  ));
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("User deleted"), backgroundColor: Colors.redAccent));
                 }
               },
               child: const Text("Delete", style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
             ),
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text("Cancel", style: TextStyle(color: Color(0xFF5E4631))),
-            ),
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel", style: TextStyle(color: Color(0xFF5E4631)))),
           ],
         );
       }),
@@ -670,10 +666,9 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('Manage Users',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+          const Text('Manage Users', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
           const SizedBox(height: 10),
-          TextField(controller: _searchCtrl, decoration: const InputDecoration(hintText: 'Search user')),
+          TextField(controller: _searchCtrl, decoration: const InputDecoration(hintText: 'Search user (username / email / uid)')),
           const SizedBox(height: 10),
           if (loading)
             const LinearProgressIndicator()
@@ -686,19 +681,12 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
                   final u = filtered[i];
                   return ListTile(
                     leading: CircleAvatar(
-                      backgroundImage: u.photoBase64.isNotEmpty
-                          ? MemoryImage(base64Decode(u.photoBase64))
-                          : null,
-                      child: u.photoBase64.isEmpty
-                          ? const Icon(Icons.person, color: Color(0xFF5E4631))
-                          : null,
+                      backgroundImage: u.photoBase64.isNotEmpty ? MemoryImage(base64Decode(u.photoBase64)) : null,
+                      child: u.photoBase64.isEmpty ? const Icon(Icons.person, color: Color(0xFF5E4631)) : null,
                     ),
                     title: Text(u.username),
                     subtitle: Text(u.email.isEmpty ? u.uid : u.email),
-                    trailing: Icon(
-                      u.disabled ? Icons.block : Icons.check_circle,
-                      color: u.disabled ? Colors.red : Colors.green,
-                    ),
+                    trailing: Icon(u.disabled ? Icons.block : Icons.check_circle, color: u.disabled ? Colors.red : Colors.green),
                     onTap: () => _showUserDialog(u),
                   );
                 },
@@ -713,22 +701,12 @@ class _ManageUsersSheetState extends State<_ManageUsersSheet> {
 class _UserRow {
   final String uid, username, email, gender, birthday, photoBase64;
   bool disabled;
-  _UserRow({
-    required this.uid,
-    required this.username,
-    required this.email,
-    required this.gender,
-    required this.birthday,
-    required this.photoBase64,
-    required this.disabled,
-  });
+  _UserRow({required this.uid, required this.username, required this.email, required this.gender, required this.birthday, required this.photoBase64, required this.disabled});
 }
 
 class _Kpi extends StatelessWidget {
   final String label;
   const _Kpi({required this.label});
   @override
-  Widget build(BuildContext context) =>
-      Text(label, style: const TextStyle(color: Color(0xFF5E4631)));
+  Widget build(BuildContext context) => Text(label, style: const TextStyle(color: Color(0xFF5E4631)));
 }
-

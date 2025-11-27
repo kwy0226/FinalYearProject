@@ -12,19 +12,24 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final _auth = FirebaseAuth.instance;
-  int _tabIndex = 3; // 默认在 Settings tab
+  int _tabIndex = 3;
 
-  // ---- 删除账号逻辑 ----
+  // ===============================================================
+  // Delete Account (FULL DELETION: Auth + all database user data)
+  // ===============================================================
   Future<void> _deleteAccount() async {
     final user = _auth.currentUser;
     if (user == null) return;
 
+    // Step 1 — Ask user for confirmation
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text("Delete Account"),
         content: const Text(
-          "Are you sure you want to permanently delete your account? This action cannot be undone.",
+          "Are you sure you want to permanently delete your account?\n"
+              "All your chats, history and profile will be erased.\n"
+              "This action cannot be undone.",
         ),
         actions: [
           TextButton(
@@ -45,30 +50,91 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (confirm != true) return;
 
-    try {
-      // Delete from Realtime Database
-      await FirebaseDatabase.instance.ref("users/${user.uid}").remove();
+    // Step 2 — Firebase requires re-authentication before deleting user
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        final ctrl = TextEditingController();
+        return AlertDialog(
+          title: const Text("Confirm Password"),
+          content: TextField(
+            controller: ctrl,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: "Enter your password",
+              border: OutlineInputBorder(),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, null),
+              child: const Text("Cancel"),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text("Confirm"),
+            ),
+          ],
+        );
+      },
+    );
 
-      // Delete Firebase Auth account
+    if (password == null || password.isEmpty) return;
+
+    try {
+      // Step 3 — Re-authenticate user with password
+      final cred = EmailAuthProvider.credential(
+        email: user.email!,
+        password: password,
+      );
+      await user.reauthenticateWithCredential(cred);
+
+      final uid = user.uid;
+      final db = FirebaseDatabase.instance.ref();
+
+      // Step 4 — Delete ALL database data related to this user
+      // (Add/remove paths based on your app structure)
+      await Future.wait([
+        db.child("users/$uid").remove(),
+        db.child("chathistory/$uid").remove(),
+        db.child("character/$uid").remove(),
+        db.child("chats/$uid").remove(),
+        db.child("audio/$uid").remove(),
+        db.child("stats/$uid").remove(),
+        // Add any other paths if used in your app
+      ]);
+
+      // Step 5 — Delete Firebase Auth account
       await user.delete();
 
       if (!mounted) return;
+
+      // Step 6 — Redirect to Login Page
       Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
+
     } catch (e) {
       if (!mounted) return;
+
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to delete account: $e")),
+        SnackBar(
+          content: Text("Failed to delete account: $e"),
+          backgroundColor: Colors.redAccent,
+        ),
       );
     }
   }
 
-  // ---- 登出逻辑 ----
+  // ===============================================================
+  // Logout (Simple Sign Out)
+  // ===============================================================
   Future<void> _logout() async {
     await _auth.signOut();
     if (!mounted) return;
     Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
   }
 
+  // Bottom navigation handling
   void _onBottomTap(int index) {
     if (index == _tabIndex) return;
     setState(() => _tabIndex = index);
@@ -84,9 +150,13 @@ class _SettingsPageState extends State<SettingsPage> {
         Navigator.pushNamed(context, '/chart');
         break;
       case 3:
-        break; // already here
+        break;
     }
   }
+
+  // ===============================================================
+  // UI
+  // ===============================================================
 
   @override
   Widget build(BuildContext context) {
@@ -99,7 +169,7 @@ class _SettingsPageState extends State<SettingsPage> {
           SafeArea(
             child: Column(
               children: [
-                // ===== Title =====
+                // ----- Page Title -----
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                   child: Text(
@@ -110,39 +180,43 @@ class _SettingsPageState extends State<SettingsPage> {
                     ),
                   ),
                 ),
+
                 const SizedBox(height: 8),
 
-                // ===== List of options =====
                 Expanded(
                   child: ListView(
                     children: [
+                      // ----- Edit Profile -----
                       ListTile(
                         leading: const Icon(Icons.person, color: Color(0xFF8B6B4A)),
                         title: const Text("Edit Profile"),
                         trailing: const Icon(Icons.arrow_forward_ios, size: 16),
                         onTap: () => Navigator.pushNamed(context, '/editProfile'),
                       ),
+
+                      // ----- About Us -----
                       ListTile(
                         leading: const Icon(Icons.info, color: Color(0xFF8B6B4A)),
                         title: const Text("About Us"),
                         trailing: const Icon(Icons.arrow_forward_ios, size: 16),
                         onTap: () => Navigator.pushNamed(context, '/aboutus'),
                       ),
+
                       const Divider(),
 
-                      // Delete account
+                      // ----- Delete Account -----
                       ListTile(
-                        leading: const Icon(Icons.delete_forever,
-                            color: Colors.redAccent),
-                        title: const Text("Delete Account",
-                            style: TextStyle(color: Colors.redAccent)),
+                        leading: const Icon(Icons.delete_forever, color: Colors.redAccent),
+                        title: const Text(
+                          "Delete Account",
+                          style: TextStyle(color: Colors.redAccent),
+                        ),
                         onTap: _deleteAccount,
                       ),
 
-                      // Logout
+                      // ----- Logout -----
                       ListTile(
-                        leading:
-                        const Icon(Icons.logout, color: Color(0xFF8B6B4A)),
+                        leading: const Icon(Icons.logout, color: Color(0xFF8B6B4A)),
                         title: const Text("Logout"),
                         onTap: _logout,
                       ),
@@ -150,7 +224,7 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ),
 
-                // ===== Bottom navigation =====
+                // Bottom navigation bar
                 Container(
                   decoration: BoxDecoration(
                     color: const Color(0xFFFFF7E9),

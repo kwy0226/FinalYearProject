@@ -9,46 +9,54 @@ class ForgotPasswordPage extends StatefulWidget {
   State<ForgotPasswordPage> createState() => _ForgotPasswordPageState();
 }
 
+// Controller for email input
 class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
   final _emailCtrl = TextEditingController();
-  bool _loading = false;
-  String? _error;
+  bool _loading = false; // Prevent double-click while sending reset email
+  String? _error; // Display error message to user
 
   @override
   void dispose() {
-    _emailCtrl.dispose();
+    _emailCtrl.dispose(); // Prevent memory leak
     super.dispose();
   }
 
-  // ---- Firebase 官方发送 Reset Link ----
+  // SEND PASSWORD RESET LINK THROUGH FIREBASE
   Future<void> _sendResetLink() async {
     final email = _emailCtrl.text.trim();
 
+    // Basic validation before sending request
     if (email.isEmpty) {
       setState(() => _error = "Please enter your email.");
       return;
     }
 
     setState(() {
-      _loading = true;
-      _error = null;
+      _loading = true; // Show loading spinner
+      _error = null; // Clear previous error
     });
 
     try {
+      // Firebase Auth built-in API to send reset link
+      // Firebase will send an email to the user immediately
       await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
 
       if (!mounted) return;
+
+      // Show success message to user
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Password reset link sent to $email")),
       );
       Navigator.pop(context); // Back to Login Page
     } on FirebaseAuthException catch (e) {
+      // Firebase returns detailed error message
       setState(() => _error = e.message ?? "Password reset failed.");
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
+  // BUILD UI
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);

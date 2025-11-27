@@ -17,7 +17,6 @@ class EditProfilePage extends StatefulWidget {
 class _EditProfilePageState extends State<EditProfilePage> {
   final _auth = FirebaseAuth.instance;
 
-  // 强制使用你项目的 Realtime DB URL（若 firebase_options 已配置可改回 FirebaseDatabase.instance）
   final FirebaseDatabase _db = FirebaseDatabase.instanceFor(
     app: Firebase.app(),
     databaseURL:
@@ -26,7 +25,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
 
   final _usernameCtrl = TextEditingController();
   String? _gender;             // "Male" | "Female"
-  String? _photoBase64;        // 头像以 Base64 存在 DB
+  String? _photoBase64;        // Avatars are stored in the database as Base64-encoded strings.
   bool _loading = false;
 
   @override
@@ -130,7 +129,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
 
   @override
   Widget build(BuildContext context) {
-    // 将 Base64 头像（若存在）解码为 MemoryImage
+    // Decode the Base64 avatar (if present) into a MemoryImage
     ImageProvider? avatarProvider;
     if (_photoBase64 != null && _photoBase64!.isNotEmpty) {
       try {
@@ -157,7 +156,7 @@ class _EditProfilePageState extends State<EditProfilePage> {
             padding: const EdgeInsets.all(20),
             child: Column(
               children: [
-                // ---- 头像（点击上传）----
+                // Profile Picture (Click to upload)
                 GestureDetector(
                   onTap: _loading ? null : _pickAndSavePhoto,
                   child: Column(
